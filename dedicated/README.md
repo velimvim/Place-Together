@@ -30,7 +30,7 @@ The original lightweight single-room server remains untouched in the root direct
 * **[`StartPlaceTogetherServer.bat`](StartPlaceTogetherServer.bat)** - Instant Windows launcher (< 0.2s startup) with automatic network IP detection.
 * **[`Dockerfile`](Dockerfile)** & **[`docker-compose.yml`](docker-compose.yml)** - Production Docker deployment configurations.
 * **[`placetogether.service`](placetogether.service)** - Systemd service unit for running 24/7 on Ubuntu/Debian/CentOS Linux VPS.
-* **[`DEDICATED_SERVER_GUIDE.md`](DEDICATED_SERVER_GUIDE.md)** - Step-by-step installation, VPS setup, firewall, and tunnel guide.
+* **[`DEDICATED_SERVER_GUIDE.md`](DEDICATED_SERVER_GUIDE.md)** - Step-by-step installation, VPS setup, firewall, and tunnel guide ([Русская версия](DEDICATED_SERVER_GUIDE_RU.md)).
 
 ---
 
@@ -67,4 +67,4 @@ options:
   --dashboard {on,off,auto}     Web Dashboard state (default: auto, reads SQLite setting)
 ```
 
-For detailed guides on remote VPS setup, systemd autostart, and tunnels, see [DEDICATED_SERVER_GUIDE.md](DEDICATED_SERVER_GUIDE.md).
+For detailed guides on remote VPS setup, systemd autostart, and tunnels, see [DEDICATED_SERVER_GUIDE.md](DEDICATED_SERVER_GUIDE.md) (или [на русском языке](DEDICATED_SERVER_GUIDE_RU.md)).

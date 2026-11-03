@@ -695,6 +695,14 @@ HTML_DASHBOARD = """<!DOCTYPE html>
   .btn-toggle-dash:hover {
     background: #dc2626; color: white; border-color: #dc2626;
   }
+  .btn-lang {
+    background: #1e293b; color: #38bdf8; font-size: 12px; font-weight: 700;
+    padding: 5px 11px; border-radius: 6px; border: 1px solid #334155;
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .btn-lang:hover {
+    background: #0284c7; color: #ffffff; border-color: #0284c7;
+  }
   .peers-title { font-size: 12px; font-weight: 700; color: var(--subtle); margin-bottom: 10px; text-transform: uppercase; }
   .peers-list { display: flex; flex-wrap: wrap; gap: 12px; }
   .peer-card {
@@ -723,49 +731,135 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     <div class="brand">
       <div class="logo-cube">P</div>
       <div>
-        <h1>PlaceTogether Dedicated Server</h1>
-        <div style="font-size: 12px; color: var(--subtle);">SQLite WAL Edition v3.4</div>
+        <h1 id="i18n-title">PlaceTogether Dedicated Server</h1>
+        <div id="i18n-version" style="font-size: 12px; color: var(--subtle);">SQLite WAL Edition v3.4</div>
       </div>
     </div>
     <div style="display: flex; align-items: center; gap: 10px;">
-      <a href="/PlaceTogether.rbxmx" download class="btn-download">Download Plugin (.rbxmx)</a>
-      <button onclick="disableDashboard()" class="btn-toggle-dash" title="Turn off Web Dashboard">Disable Dashboard</button>
-      <div class="pulse-badge"><span class="dot"></span> Online & Syncing</div>
+      <a href="/PlaceTogether.rbxmx" download class="btn-download" id="i18n-download">Download Plugin (.rbxmx)</a>
+      <button onclick="disableDashboard()" class="btn-toggle-dash" id="i18n-disable" title="Turn off Web Dashboard">Disable Dashboard</button>
+      <button onclick="toggleLang()" class="btn-lang" id="btn-lang" title="Switch Language / Сменить язык">RU</button>
+      <div class="pulse-badge"><span class="dot"></span> <span id="i18n-online">Online & Syncing</span></div>
     </div>
   </header>
 
   <div class="stats-grid">
     <div class="stat-card">
-      <div class="stat-label">Active Developers</div>
+      <div class="stat-label" id="i18n-stat-peers">Active Developers</div>
       <div class="stat-val" id="stat-peers">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total Projects</div>
+      <div class="stat-label" id="i18n-stat-rooms">Total Projects</div>
       <div class="stat-val" id="stat-rooms">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Total Map Objects</div>
+      <div class="stat-label" id="i18n-stat-objects">Total Map Objects</div>
       <div class="stat-val" id="stat-objects">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Uptime</div>
+      <div class="stat-label" id="i18n-stat-uptime">Uptime</div>
       <div class="stat-val" id="stat-uptime">0s</div>
     </div>
   </div>
 
-  <div class="section-title">Projects & Connected Developers</div>
+  <div class="section-title" id="i18n-section-title">Projects & Connected Developers</div>
   <div id="projects-container">
-    <div style="color: var(--muted); font-size: 14px;">Loading project status...</div>
+    <div style="color: var(--muted); font-size: 14px;" id="i18n-loading">Loading project status...</div>
   </div>
 
   <footer>
-    <div>Access logs redirected to <code>server.log</code> &bull; Console filtered to high-priority events</div>
-    <div>Auto-refreshes every 3s</div>
+    <div id="i18n-footer-logs">Access logs redirected to <code>server.log</code> &bull; Console filtered to high-priority events</div>
+    <div id="i18n-footer-refresh">Auto-refreshes every 3s</div>
   </footer>
 </div>
 
 <script>
 let lastRenderedHtml = '';
+let currentLang = localStorage.getItem('pt_lang') || 'en';
+
+const I18N = {
+  en: {
+    title: 'PlaceTogether Dedicated Server',
+    version: 'SQLite WAL Edition v3.4',
+    download: 'Download Plugin (.rbxmx)',
+    disable: 'Disable Dashboard',
+    online: 'Online & Syncing',
+    activeDevs: 'Active Developers',
+    totalProjects: 'Total Projects',
+    totalObjects: 'Total Map Objects',
+    uptime: 'Uptime',
+    sectionTitle: 'Projects & Connected Developers',
+    loading: 'Loading project status...',
+    noProjects: 'No projects created on server yet. Create a project from Roblox Studio PlaceTogether plugin.',
+    activeInStudio: 'active in Studio',
+    editingNow: 'Developers Editing Now:',
+    noDevs: 'No developers currently active in Studio. Changes are safely saved in SQLite.',
+    passProtected: 'Password Protected',
+    objects: 'objects',
+    footerLogs: 'Access logs redirected to <code>server.log</code> &bull; Console filtered to high-priority events',
+    footerRefresh: 'Auto-refreshes every 3s',
+    confirmDisable: 'Turn off the Web Dashboard? Studio synchronization will continue unaffected. You can re-enable the dashboard at any time.',
+    langBtn: 'RU',
+    langTitle: 'Переключить на русский язык'
+  },
+  ru: {
+    title: 'PlaceTogether Выделенный Сервер',
+    version: 'SQLite WAL Редакция v3.4',
+    download: 'Скачать плагин (.rbxmx)',
+    disable: 'Выключить панель',
+    online: 'В сети и синхронизируется',
+    activeDevs: 'Активные разработчики',
+    totalProjects: 'Всего проектов',
+    totalObjects: 'Всего объектов карты',
+    uptime: 'Время работы',
+    sectionTitle: 'Проекты и подключенные разработчики',
+    loading: 'Загрузка статуса проектов...',
+    noProjects: 'На сервере пока нет проектов. Создайте проект через плагин PlaceTogether в Roblox Studio.',
+    activeInStudio: 'активно в Studio',
+    editingNow: 'Сейчас редактируют:',
+    noDevs: 'В Studio сейчас нет активных разработчиков. Изменения надёжно сохранены в SQLite.',
+    passProtected: 'Защищено паролем',
+    objects: 'объектов',
+    footerLogs: 'Логи доступа перенаправлены в <code>server.log</code> &bull; Консоль очищена от спама',
+    footerRefresh: 'Автообновление каждые 3 сек',
+    confirmDisable: 'Выключить веб-панель? Синхронизация в Studio продолжит работать. Вы сможете включить панель в любой момент.',
+    langBtn: 'EN',
+    langTitle: 'Switch to English'
+  }
+};
+
+function t(key) {
+  return (I18N[currentLang] && I18N[currentLang][key]) || (I18N.en[key] || key);
+}
+
+function applyLanguage() {
+  const el = (id) => document.getElementById(id);
+  if (el('i18n-title')) el('i18n-title').textContent = t('title');
+  if (el('i18n-version')) el('i18n-version').textContent = t('version');
+  if (el('i18n-download')) el('i18n-download').textContent = t('download');
+  if (el('i18n-disable')) el('i18n-disable').textContent = t('disable');
+  if (el('i18n-online')) el('i18n-online').textContent = t('online');
+  if (el('i18n-stat-peers')) el('i18n-stat-peers').textContent = t('activeDevs');
+  if (el('i18n-stat-rooms')) el('i18n-stat-rooms').textContent = t('totalProjects');
+  if (el('i18n-stat-objects')) el('i18n-stat-objects').textContent = t('totalObjects');
+  if (el('i18n-stat-uptime')) el('i18n-stat-uptime').textContent = t('uptime');
+  if (el('i18n-section-title')) el('i18n-section-title').textContent = t('sectionTitle');
+  if (el('i18n-footer-logs')) el('i18n-footer-logs').innerHTML = t('footerLogs');
+  if (el('i18n-footer-refresh')) el('i18n-footer-refresh').textContent = t('footerRefresh');
+  const btn = el('btn-lang');
+  if (btn) {
+    btn.textContent = t('langBtn');
+    btn.title = t('langTitle');
+  }
+  lastRenderedHtml = '';
+  refreshDashboard();
+}
+
+function toggleLang() {
+  currentLang = (currentLang === 'en') ? 'ru' : 'en';
+  localStorage.setItem('pt_lang', currentLang);
+  applyLanguage();
+}
 
 async function refreshDashboard() {
   try {
@@ -785,7 +879,7 @@ async function refreshDashboard() {
 
     const container = document.getElementById('projects-container');
     if (!data.rooms || data.rooms.length === 0) {
-      const emptyHtml = '<div class="project-card"><div style="color: var(--subtle);">No projects created on server yet. Create a project from Roblox Studio PlaceTogether plugin.</div></div>';
+      const emptyHtml = '<div class="project-card"><div style="color: var(--subtle);">' + t('noProjects') + '</div></div>';
       if (lastRenderedHtml !== emptyHtml) {
         container.innerHTML = emptyHtml;
         lastRenderedHtml = emptyHtml;
@@ -803,17 +897,17 @@ async function refreshDashboard() {
               ${escapeHtml(r.name)}
               <span class="pill">ID: ${escapeHtml(r.id)}</span>
               <span class="pill">Rev ${r.revision}</span>
-              <span class="pill">${r.objects_count} objects</span>
-              ${r.requires_password ? '<span class="pill" style="color: #f59e0b;">Password Protected</span>' : ''}
+              <span class="pill">${r.objects_count} ${t('objects')}</span>
+              ${r.requires_password ? '<span class="pill" style="color: #f59e0b;">' + t('passProtected') + '</span>' : ''}
             </div>
-            <div style="font-size: 12px; color: var(--muted);">${peers.length} active in Studio</div>
+            <div style="font-size: 12px; color: var(--muted);">${peers.length} ${t('activeInStudio')}</div>
           </div>
-          <div class="peers-title">Developers Editing Now:</div>
+          <div class="peers-title">${t('editingNow')}</div>
           <div class="peers-list">
       `;
 
       if (peers.length === 0) {
-        html += '<div class="empty-peers">No developers currently active in Studio. Changes are safely saved in SQLite.</div>';
+        html += '<div class="empty-peers">' + t('noDevs') + '</div>';
       } else {
         for (const p of peers) {
           const avatarUrl = `/api/avatar?userId=${p.userId || 0}`;
@@ -862,7 +956,7 @@ function escapeHtml(str) {
 }
 
 async function disableDashboard() {
-  if (!confirm('Turn off the Web Dashboard? Studio synchronization will continue unaffected. You can re-enable the dashboard at any time.')) return;
+  if (!confirm(t('confirmDisable'))) return;
   try {
     const res = await fetch('/api/config/dashboard', {
       method: 'POST',
@@ -877,7 +971,9 @@ async function disableDashboard() {
   }
 }
 
-refreshDashboard();
+applyLanguage();
+setInterval(refreshDashboard, 3000);
+</script>
 setInterval(refreshDashboard, 3000);
 </script>
 </body>
