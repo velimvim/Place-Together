@@ -1,0 +1,16 @@
+[Unit]
+Description=PlaceTogether Dedicated 24/7 Co-op Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/placetogether
+ExecStart=/usr/bin/python3 /opt/placetogether/server.py --host 0.0.0.0 --port 8787 --db /opt/placetogether/placetogether.db
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

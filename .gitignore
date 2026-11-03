@@ -1,0 +1,18 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime SQLite databases & logs
+*.db
+*.db-shm
+*.db-wal
+*.log
+data.json*
+
+# Temporary files & backups
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+audit.md

@@ -1,0 +1,11 @@
+services:
+  placetogether:
+    build: .
+    container_name: placetogether-server
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
