@@ -642,6 +642,11 @@ class Database:
     def close(self):
         with self.lock:
             try:
+                cur = self.conn.cursor()
+                cur.execute("PRAGMA freelist_count;")
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    self.conn.execute("VACUUM;")
                 self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                 self.conn.close()
             except Exception:
