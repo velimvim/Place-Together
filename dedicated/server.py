@@ -426,6 +426,12 @@ class Database:
                 self.conn.execute("DELETE FROM room_members WHERE room_id = ?", (room_id,))
                 self.conn.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
 
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                self.conn.execute("VACUUM;")
+            except Exception as e:
+                logger.warning(f"Failed to vacuum database after room deletion: {e}")
+
             return True, room["name"]
 
     def is_authorized(self, room_id: str, token: str) -> bool:
