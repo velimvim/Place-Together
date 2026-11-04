@@ -403,6 +403,68 @@ local btnForcePush = makeButton("Force Push Local Place to Server", sessionCard)
 local btnForcePull = makeButton("Force Pull / Reload from Server", sessionCard)
 local connect = makeButton("Leave Session", sessionCard, "danger")
 
+local btnDeleteActiveRoom = makeButton("Delete Active Project from Server", sessionCard, "danger")
+btnDeleteActiveRoom.Size = UDim2.new(1, 0, 0, 28)
+btnDeleteActiveRoom.TextSize = 11
+
+local activeDelConfirm = container(sessionCard, "ActiveDelConfirm")
+activeDelConfirm.Visible = false
+activeDelConfirm.BackgroundColor3 = palette.dangerBg
+pad(activeDelConfirm, 6, 6)
+corner(activeDelConfirm, 6)
+stroke(activeDelConfirm, palette.dangerBorder, 1)
+
+local activeDelPrompt = textLabel("Permanently delete this project from server?", 20, activeDelConfirm)
+activeDelPrompt.TextColor3 = Color3.fromRGB(252, 165, 165)
+activeDelPrompt.TextSize = 11
+
+local activeDelPw = field("Password (leave blank if none)", "", activeDelConfirm)
+activeDelPw.Size = UDim2.new(1, 0, 0, 26)
+
+local activeDelActRow = container(activeDelConfirm, "ActiveDelActRow")
+activeDelActRow.Size = UDim2.new(1, 0, 0, 28)
+local activeDelActLayout = Instance.new("UIListLayout")
+activeDelActLayout.FillDirection = Enum.FillDirection.Horizontal
+activeDelActLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+activeDelActLayout.Padding = UDim.new(0, 8)
+activeDelActLayout.Parent = activeDelActRow
+
+local activeDelCancel = makeButton("Cancel", activeDelActRow)
+activeDelCancel.Size = UDim2.new(0, 70, 0, 26)
+activeDelCancel.TextSize = 11
+
+local activeDelExec = makeButton("Confirm Delete", activeDelActRow, "danger")
+activeDelExec.Size = UDim2.new(0, 110, 0, 26)
+activeDelExec.TextSize = 11
+
+btnDeleteActiveRoom.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	activeDelConfirm.Visible = true
+	btnDeleteActiveRoom.Visible = false
+end)
+
+activeDelCancel.MouseButton1Click:Connect(function()
+	activeDelConfirm.Visible = false
+	btnDeleteActiveRoom.Visible = true
+end)
+
+activeDelExec.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	local curRoom = room.Text
+	status("Deleting project " .. curRoom .. " from server...")
+	local ok, res = pcall(function()
+		return api("/rooms/" .. curRoom .. "/delete", "POST", {password = activeDelPw.Text})
+	end)
+	if ok then
+		status("Project deleted successfully from server.")
+		connectSession()
+		uiTab = "projects"
+		refreshProjectsList()
+	else
+		status("Delete failed: " .. tostring(res))
+	end
+end)
+
 local inviteCard = card(sessionPanel, "Invite")
 local inviteHeader = title("Direct P2P Peer Invite", inviteCard)
 inviteHeader.TextSize = 14
@@ -1293,7 +1355,7 @@ api = function(path, method, payload, renewed)
 
 	local authHeader = "Bearer " .. (credential or token.Text or "")
 	local response = Http:RequestAsync({Url = reqUrl, Method = method or "GET", Headers = {Authorization = authHeader, ["Content-Type"] = "application/json", ["bypass-tunnel-reminder"] = "true"}, Body = payload and Http:JSONEncode(payload) or nil})
-	if response.StatusCode == 401 and path ~= "/guest" and path ~= "/rooms/auth" and not renewed then guestEnter(); return api(path, method, payload, true) end
+	if response.StatusCode == 401 and path ~= "/guest" and path ~= "/rooms/auth" and not path:find("/delete") and not renewed then guestEnter(); return api(path, method, payload, true) end
 	local decoded, data = pcall(function() return Http:JSONDecode(response.Body) end)
 	if not decoded then error("Server unavailable (HTTP "..response.StatusCode.."). Check server address and verify server is running.") end
 	if not response.Success then error(data.error or ("HTTP "..response.StatusCode)) end
@@ -1717,6 +1779,84 @@ local function refreshProjectsList()
 			status("Selected room: " .. r.name .. " (" .. r.id .. ")")
 			if r.requires_password then
 				projectJoinPassword:CaptureFocus()
+			end
+		end)
+
+		local delBtn = makeButton("Delete Project", row, "danger")
+		delBtn.TextSize = 11
+		delBtn.Size = UDim2.new(1, 0, 0, 26)
+
+		local confirmBox = container(row, "ConfirmDelete")
+		confirmBox.Visible = false
+		confirmBox.BackgroundColor3 = palette.dangerBg
+		pad(confirmBox, 6, 6)
+		corner(confirmBox, 6)
+		stroke(confirmBox, palette.dangerBorder, 1)
+
+		local confirmPrompt = textLabel(
+			r.requires_password
+				and "Enter password to permanently delete this project:"
+				or "Are you sure you want to permanently delete this project?",
+			20,
+			confirmBox
+		)
+		confirmPrompt.TextColor3 = Color3.fromRGB(252, 165, 165)
+		confirmPrompt.TextSize = 11
+
+		local delPwInput = nil
+		if r.requires_password then
+			delPwInput = field("Enter room password", "", confirmBox)
+			delPwInput.Size = UDim2.new(1, 0, 0, 26)
+		end
+
+		local actionRow = container(confirmBox, "ActionRow")
+		actionRow.Size = UDim2.new(1, 0, 0, 28)
+		local actLayout = Instance.new("UIListLayout")
+		actLayout.FillDirection = Enum.FillDirection.Horizontal
+		actLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+		actLayout.Padding = UDim.new(0, 8)
+		actLayout.Parent = actionRow
+
+		local cancelBtn = makeButton("Cancel", actionRow)
+		cancelBtn.Size = UDim2.new(0, 70, 0, 26)
+		cancelBtn.TextSize = 11
+
+		local execDelBtn = makeButton("Confirm Delete", actionRow, "danger")
+		execDelBtn.Size = UDim2.new(0, 110, 0, 26)
+		execDelBtn.TextSize = 11
+
+		delBtn.MouseButton1Click:Connect(function()
+			confirmBox.Visible = true
+			delBtn.Visible = false
+			if delPwInput then
+				delPwInput:CaptureFocus()
+			end
+		end)
+
+		cancelBtn.MouseButton1Click:Connect(function()
+			confirmBox.Visible = false
+			delBtn.Visible = true
+		end)
+
+		execDelBtn.MouseButton1Click:Connect(function()
+			local pw = delPwInput and delPwInput.Text or ""
+			if r.requires_password and pw == "" then
+				status("Password is required to delete this project.")
+				if delPwInput then delPwInput:CaptureFocus() end
+				return
+			end
+			status("Deleting project '" .. r.name .. "' (" .. r.id .. ")...")
+			local ok, res = pcall(function()
+				return api("/rooms/" .. r.id .. "/delete", "POST", {password = pw})
+			end)
+			if ok then
+				status("Project '" .. r.name .. "' deleted successfully.")
+				if room.Text == r.id and active then
+					connectSession()
+				end
+				refreshProjectsList()
+			else
+				status("Delete failed: " .. tostring(res))
 			end
 		end)
 	end

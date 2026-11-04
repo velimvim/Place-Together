@@ -400,6 +400,34 @@ class Database:
                 "requires_password": bool(pw_hash)
             }
 
+    def delete_room(self, room_id: str, password: str = "", token: str = "") -> tuple:
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute("SELECT * FROM rooms WHERE id = ?", (room_id,))
+            row = cur.fetchone()
+            if not row:
+                return False, "Room not found on server"
+
+            room = dict(row)
+            pw_hash = room.get("password_hash", "")
+            salt = room.get("salt", "")
+
+            # Password check if room is password-protected
+            if pw_hash:
+                if not password:
+                    return False, "Password required to delete this room"
+                if not verify_password(password, pw_hash, salt):
+                    return False, "Incorrect room password"
+
+            with self.conn:
+                self.conn.execute("DELETE FROM objects WHERE room_id = ?", (room_id,))
+                self.conn.execute("DELETE FROM history WHERE room_id = ?", (room_id,))
+                self.conn.execute("DELETE FROM room_tokens WHERE room_id = ?", (room_id,))
+                self.conn.execute("DELETE FROM room_members WHERE room_id = ?", (room_id,))
+                self.conn.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
+
+            return True, room["name"]
+
     def is_authorized(self, room_id: str, token: str) -> bool:
         if not room_id or not token:
             return False
@@ -807,7 +835,10 @@ async function refreshDashboard() {
               <span class="pill">${r.objects_count} objects</span>
               ${r.requires_password ? '<span class="pill" style="color: #f59e0b;">Password Protected</span>' : ''}
             </div>
-            <div style="font-size: 12px; color: var(--muted);">${peers.length} active in Studio</div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <div style="font-size: 12px; color: var(--muted);">${peers.length} active in Studio</div>
+              <button onclick="deleteRoom('${escapeHtml(r.id)}', '${escapeHtml(r.name)}', ${r.requires_password})" style="background:#2d161a;color:#fca5a5;border:1px solid #782832;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;">Delete</button>
+            </div>
           </div>
           <div class="peers-title">Developers Editing Now:</div>
           <div class="peers-list">
@@ -854,6 +885,32 @@ async function refreshDashboard() {
     }
   } catch (err) {
     console.error('Failed to update dashboard:', err);
+  }
+}
+
+async function deleteRoom(id, name, requiresPassword) {
+  let pw = '';
+  if (requiresPassword) {
+    pw = prompt(`Project '${name}' is password-protected.\nEnter room password to confirm permanent deletion:`);
+    if (pw === null) return;
+    if (!pw.trim()) { alert('Password is required to delete this project.'); return; }
+  } else {
+    if (!confirm(`Are you sure you want to permanently delete project '${name}' (${id})?`)) return;
+  }
+  try {
+    const res = await fetch(`/api/rooms/${id}/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      refreshDashboard();
+    } else {
+      alert('Delete failed: ' + (data.error || 'Server error'));
+    }
+  } catch (err) {
+    alert('Request failed: ' + err.message);
   }
 }
 
@@ -1287,6 +1344,9 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
 
         self.send_json(404, {"error": f"Endpoint not found: {path}"})
 
+    def do_DELETE(self):
+        self.do_POST()
+
     def do_POST(self):
         path = self.path.split("?")[0]
         data = self.read_body()
@@ -1353,6 +1413,56 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                 "name": name,
                 "token": creator_token,
                 "requires_password": bool(pw_hash)
+            })
+            return
+
+        # Delete Room: POST /api/rooms/<id>/delete or POST /api/rooms/delete
+        if (path.startswith("/api/rooms/") and path.endswith("/delete")) or path == "/api/rooms/delete":
+            if path == "/api/rooms/delete":
+                room_id = data.get("roomId", "").strip() or data.get("id", "").strip()
+            else:
+                parts = path.split("/")
+                room_id = parts[3]
+
+            room = db.get_room(room_id) or db.find_room_by_id_or_name(room_id)
+            if not room:
+                self.send_json(404, {"error": "Room not found on server"})
+                return
+
+            real_id = room["id"]
+            password = data.get("password", "") if isinstance(data, dict) else ""
+
+            client_ip = self.client_address[0]
+            now = time.time()
+            failed_info = failed_attempts.get(client_ip, [0, 0])
+            if failed_info[0] >= 5 and (now - failed_info[1] < 15):
+                wait_sec = int(15 - (now - failed_info[1]))
+                self.send_json(429, {"error": f"Too many failed password attempts. Please wait {wait_sec}s."})
+                return
+
+            ok, res = db.delete_room(real_id, password=password, token=token)
+            if not ok:
+                if "password" in res.lower():
+                    failed_attempts[client_ip] = [failed_info[0] + 1, now]
+                    status_code = 401
+                else:
+                    status_code = 400
+                self.send_json(status_code, {"error": res})
+                return
+
+            failed_attempts.pop(client_ip, None)
+
+            with state_lock:
+                presences.pop(real_id, None)
+                last_logged_peers.pop(real_id, None)
+
+            guest = db.get_guest(token)
+            user_name = guest["name"] if guest else "User"
+            console_log("DELETE", f"Project '{res}' (ID: {real_id}) deleted by '{user_name}' ({client_ip})")
+
+            self.send_json(200, {
+                "success": True,
+                "message": f"Project '{res}' ({real_id}) deleted successfully"
             })
             return
 
