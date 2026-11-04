@@ -654,6 +654,7 @@ local currentRevision = 0
 -- DIRTY TRACKING QUEUES (EVENT-DRIVEN: 0% CPU WHEN IDLE)
 local dirtyObjects = {}
 local dirtyDeleted = {}
+local hasLocalEdits = false
 local cachedSnapshot = {}
 local initialScanDone = false
 
@@ -1331,6 +1332,7 @@ local function hookHierarchy(service)
 		service.DescendantAdded:Connect(function(obj)
 			if eligible(obj) then
 				dirtyObjects[obj] = true
+				hasLocalEdits = true
 				if not ids[obj] then
 					local key = Http:GenerateGUID(false)
 					ids[obj] = key; objects[key] = obj; obj:SetAttribute("PT_ObjectId", key)
@@ -1342,6 +1344,7 @@ local function hookHierarchy(service)
 			if key then
 				dirtyDeleted[key] = true
 				dirtyObjects[obj] = nil
+				hasLocalEdits = true
 			end
 		end)
 	end)
@@ -1357,24 +1360,30 @@ pcall(function()
 	Selection.SelectionChanged:Connect(function()
 		for _, c in ipairs(selectionConnections) do pcall(function() c:Disconnect() end) end
 		table.clear(selectionConnections)
-		for _, obj in ipairs(Selection:Get()) do
+		local toWatch = {}
+		for _, item in ipairs(Selection:Get()) do
+			table.insert(toWatch, item)
+			if item:IsA("Model") then
+				for _, d in ipairs(item:GetDescendants()) do
+					if d:IsA("BasePart") then table.insert(toWatch, d) end
+				end
+			end
+		end
+		for _, obj in ipairs(toWatch) do
 			if eligible(obj) then
-				local isLimb = obj:IsA("BasePart") and isRigLimb(obj)
-				local isAcc = obj:IsA("BasePart") and obj:FindFirstAncestorWhichIsA("Accessory") ~= nil
-				local m = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
-				if not isLimb and not isAcc and not (m and isRigBeingAnimated(m)) then
+				local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+				if not (curM and isRigBeingAnimated(curM)) then
 					dirtyObjects[obj] = true
+					hasLocalEdits = true
 				end
 				local ok, conn = pcall(function()
 					return obj.Changed:Connect(function(prop)
-						if (prop == "CFrame" or prop == "Position" or prop == "Orientation") and obj:IsA("BasePart") and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
-							return
-						end
-						local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
-						if curM and isRigBeingAnimated(curM) then
+						local m = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+						if m and isRigBeingAnimated(m) then
 							return
 						end
 						dirtyObjects[obj] = true
+						hasLocalEdits = true
 					end)
 				end)
 				if ok and conn then table.insert(selectionConnections, conn) end
@@ -1414,6 +1423,10 @@ local function snapshot(forceFull)
 		table.clear(dirtyDeleted)
 		initialScanDone = true
 		return cachedSnapshot
+	end
+
+	if next(dirtyDeleted) or next(dirtyObjects) or next(dirtyTerrainChunks) then
+		hasLocalEdits = true
 	end
 
 	-- Incremental: apply deletions
@@ -1745,8 +1758,11 @@ end
 -- ZERO-LAG SENDCHANGES: only compares and sends when objects were actually edited
 local function sendChanges(current, forceFullCompare)
 	local list = {}
-	if forceFullCompare or next(dirtyObjects) or next(dirtyDeleted) or next(dirtyTerrainChunks) then
+	if forceFullCompare or hasLocalEdits then
 		list = changes(current)
+		if #list == 0 then
+			hasLocalEdits = false
+		end
 	end
 
 	if #list > 0 then
@@ -1768,6 +1784,7 @@ local function sendChanges(current, forceFullCompare)
 			table.insert(batches, curBatch)
 		end
 
+		hasLocalEdits = false
 		local sentCount = 0
 		for _, batch in ipairs(batches) do
 			sentCount += #batch
@@ -2117,9 +2134,17 @@ btnForcePush.MouseButton1Click:Connect(function()
 			for j = i, math.min(i + BATCH_SIZE - 1, #list) do
 				table.insert(batch, list[j])
 			end
-			request("POST", {changes = batch, since = currentRevision})
+			local res = request("POST", {changes = batch, since = currentRevision})
+			if res and res.revision then
+				currentRevision = res.revision
+				for _, item in ipairs(batch) do
+					baseline[item.id] = copy(item.value)
+					versions[item.id] = currentRevision
+				end
+			end
 		end
-		status("Successfully pushed place to server!")
+		hasLocalEdits = false
+		status("Successfully pushed place to server! (Rev " .. tostring(currentRevision) .. ")")
 	end)
 	busy = false
 	if not ok then status("Push failed: " .. tostring(err)) end
@@ -2136,12 +2161,21 @@ btnForcePull.MouseButton1Click:Connect(function()
 	status("Pulling fresh copy from dedicated server...")
 	local ok, err = pcall(function()
 		local current = snapshot(true)
-		local state = request("GET")
+		local pUrl = endpoint .. (endpoint:find("?") and "&" or "?") .. "page=1&limit=250&_t=" .. tostring(os.clock())
+		local resp = Http:RequestAsync({Url = pUrl, Method = "GET", Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json"}})
+		if not resp.Success then error("HTTP " .. tostring(resp.StatusCode)) end
+		local state = Http:JSONDecode(resp.Body)
 		state = downloadAllObjects(state)
 		apply(state.objects, current, true)
+		currentRevision = state.revision or currentRevision
+		for k, v in pairs(state.objects or {}) do
+			baseline[k] = copy(v.value)
+			versions[k] = v.version
+		end
+		hasLocalEdits = false
 		consolidateEclipseSaves()
 		ensureAccessoryWelds()
-		status("Place updated from server.")
+		status("Place updated from server. (Rev " .. tostring(currentRevision) .. ")")
 	end)
 	busy = false
 	if not ok then status("Pull failed: " .. tostring(err)) end
