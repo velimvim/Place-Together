@@ -1090,11 +1090,11 @@ end
 local function ensureAccessoryWelds()
 	for _, m in ipairs(workspace:GetDescendants()) do
 		if m:IsA("Model") and (m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")) then
+			local beingAnimated = isRigBeingAnimated(m)
 			for _, acc in ipairs(m:GetChildren()) do
 				if acc:IsA("Accessory") then
 					local h = acc:FindFirstChild("Handle")
 					if h and h:IsA("BasePart") then
-						h.Anchored = false
 						local rc = h:FindFirstChildOfClass("RigidConstraint")
 						local a0 = rc and rc.Attachment0 or h:FindFirstChildOfClass("Attachment")
 						local a1 = rc and rc.Attachment1
@@ -1106,27 +1106,33 @@ local function ensureAccessoryWelds()
 								end
 							end
 						end
-						if a0 and a1 and a1.Parent and a1.Parent:IsA("BasePart") then
+						if a1 and a1.Parent and a1.Parent:IsA("BasePart") then
+							local limb = a1.Parent
 							local w = h:FindFirstChild("AccessoryWeld")
-							if not w or not w:IsA("Weld") or w.Part1 ~= a1.Parent then
-								if w then pcall(function() w:Destroy() end) end
-								local ok, newWeld = pcall(function()
-									local wld = Instance.new("Weld")
-									wld.Name = "AccessoryWeld"
-									wld.Part0 = h
-									wld.Part1 = a1.Parent
-									wld.C0 = a0.CFrame
-									wld.C1 = a1.CFrame
-									wld.Parent = h
-									return wld
-								end)
-							else
-								pcall(function()
-									w.C0 = a0.CFrame
-									w.C1 = a1.CFrame
-								end)
+							if not beingAnimated or not w or not w:IsA("Weld") or w.Part1 ~= limb then
+								local c0 = a0 and a0.CFrame or CFrame.new()
+								-- Mathematically preserve exact visual position: Part0.CFrame * C0 = Part1.CFrame * C1
+								local c1 = limb.CFrame:Inverse() * h.CFrame * c0
+								if not w or not w:IsA("Weld") or w.Part1 ~= limb then
+									if w then pcall(function() w:Destroy() end) end
+									pcall(function()
+										local wld = Instance.new("Weld")
+										wld.Name = "AccessoryWeld"
+										wld.Part0 = h
+										wld.Part1 = limb
+										wld.C0 = c0
+										wld.C1 = c1
+										wld.Parent = h
+									end)
+								else
+									pcall(function()
+										w.C0 = c0
+										w.C1 = c1
+									end)
+								end
 							end
 						end
+						pcall(function() h.Anchored = false end)
 					end
 				end
 			end
