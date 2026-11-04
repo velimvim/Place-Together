@@ -48,6 +48,9 @@ local palette = {
 }
 
 local alive = true
+local api
+local base
+local fetchDashStatus
 local localUserId = 0
 pcall(function()
 	local uid = game:GetService("StudioService"):GetUserId()
@@ -309,7 +312,12 @@ for i, item in ipairs(tabList) do
 	s.Enabled = false
 	tabStrokes[item[1]] = s
 	tabButtons[item[1]] = b
-	b.MouseButton1Click:Connect(function() uiTab = item[1] end)
+	b.MouseButton1Click:Connect(function()
+		uiTab = item[1]
+		if item[1] == "settings" and fetchDashStatus then
+			task.spawn(fetchDashStatus)
+		end
+	end)
 end
 
 -- ============================================================
@@ -465,22 +473,38 @@ local function updateDashButton(state)
 	end
 end
 
-local function fetchDashStatus()
-	pcall(function()
-		local cfg = api("/config/dashboard")
-		if type(cfg) == "table" and cfg.enabled ~= nil then
+fetchDashStatus = function()
+	if not api then return end
+	task.spawn(function()
+		local ok, cfg = pcall(function()
+			return api("/config/dashboard", "GET")
+		end)
+		if ok and type(cfg) == "table" and cfg.enabled ~= nil then
 			updateDashButton(cfg.enabled == true)
+		else
+			dashToggle.Text = "Web Dashboard: Disabled"
+			dashToggle.TextColor3 = palette.subtle
 		end
 	end)
 end
 
 dashToggle.MouseButton1Click:Connect(function()
-	pcall(function()
-		dashToggle.Text = "Updating..."
-		local res = api("/config/dashboard", "POST", {enabled = not isDashEnabled})
-		if type(res) == "table" and res.enabled ~= nil then
+	if not api then
+		status("Please wait, plugin is initializing...")
+		return
+	end
+	dashToggle.Text = "Updating..."
+	task.spawn(function()
+		local ok, res = pcall(function()
+			return api("/config/dashboard", "POST", {enabled = not isDashEnabled})
+		end)
+		if ok and type(res) == "table" and res.enabled ~= nil then
 			updateDashButton(res.enabled == true)
 			status("Web Dashboard " .. (res.enabled and "enabled" or "disabled") .. " on server.")
+		else
+			updateDashButton(isDashEnabled)
+			local err = (not ok and tostring(res)) or (type(res) == "table" and res.error) or "Server error"
+			status("Failed to toggle dashboard: " .. tostring(err))
 		end
 	end)
 end)
@@ -605,6 +629,18 @@ local appearanceRetry = {}
 local warnings = {}
 
 local function status(s) setNotice(s) end
+local function formatCount(n)
+	n = tonumber(n) or 0
+	if n >= 1000000 then
+		local m = n / 1000000
+		return string.format(m >= 10 and "%.0fM" or "%.1fM", m):gsub("%.0M", "M")
+	elseif n >= 1000 then
+		local k = n / 1000
+		return string.format(k >= 10 and "%.0fk" or "%.1fk", k):gsub("%.0k", "k")
+	else
+		return tostring(n)
+	end
+end
 local function warn(key, message) warnings[key] = message end
 local function warningText()
 	local count = 0; local sample = {}
@@ -868,7 +904,150 @@ local function isToolboxDescendant(obj)
 	return false
 end
 
-local function eligible(obj) return obj ~= script and obj ~= workspace.CurrentCamera and not obj:IsA("Terrain") and not isToolboxDescendant(obj) end
+local function isAnimationArtifact(obj)
+	if not obj then return false end
+	local name = obj.Name
+	if name == "CameraRig" or name == "RootCam" or name == "TemporaryScriptFolder" then
+		return true
+	end
+	return false
+end
+
+local function isRigLimb(part)
+	if not part or not part:IsA("BasePart") then return false end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return false end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if not humanoid or part.Name == "HumanoidRootPart" or part == m.PrimaryPart then return false end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return false end
+
+	-- 1. Direct joint check
+	local ok, joints = pcall(function() return part:GetJoints() end)
+	if ok and joints then
+		for _, joint in ipairs(joints) do
+			if joint:IsA("Motor6D") and (joint.Part1 == part or joint.Part0 == part) then
+				return true
+			end
+		end
+	end
+
+	-- 2. Safe descendant traversal: EVERY property access wrapped in pcall
+	local okD, descs = pcall(function() return m:GetDescendants() end)
+	if okD and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local ok1, p1 = pcall(function() return desc.Part1 end)
+				local ok0, p0 = pcall(function() return desc.Part0 end)
+				if (ok1 and p1 == part) or (ok0 and p0 == part) then return true end
+			elseif desc:IsA("AnimationConstraint") then
+				local okAtt1, att1 = pcall(function() return desc.Attachment1 end)
+				if okAtt1 and att1 and att1.Parent == part then return true end
+				local okAtt0, att0 = pcall(function() return desc.Attachment0 end)
+				if okAtt0 and att0 and att0.Parent == part then return true end
+			elseif desc:IsA("Constraint") then
+				local okAtt1, att1 = pcall(function() return desc.Attachment1 end)
+				if okAtt1 and att1 and att1:IsDescendantOf(part) then return true end
+			end
+		end
+	end
+
+	-- 3. Standard R15/R6 limb name fallback
+	local name = part.Name
+	if name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name == "Torso"
+		or name:find("Arm") or name:find("Leg") or name:find("Hand") or name:find("Foot") then
+		return true
+	end
+
+	return false
+end
+
+local function isCharacterPart(part)
+	if not part or not part:IsA("BasePart") then return false end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return true end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return false end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if humanoid then return true end
+	if isRigLimb(part) then return true end
+	local name = part.Name
+	if name == "HumanoidRootPart" or name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name:find("Leg") or name:find("Arm") or name:find("Foot") or name:find("Hand") or name == "Handle" then
+		return true
+	end
+	return false
+end
+
+local function getRigLimbRestCFrame(part)
+	if not part or not part:IsA("BasePart") then return nil end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return nil end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if not humanoid or part.Name == "HumanoidRootPart" or part == m.PrimaryPart then return nil end
+
+	local ok, descs = pcall(function() return m:GetDescendants() end)
+	if ok and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local okJoint, res = pcall(function()
+					if desc.Part1 == part and desc.Part0 and desc.Part0:IsA("BasePart") then
+						return desc.Part0.CFrame * desc.C0 * desc.C1:Inverse()
+					end
+				end)
+				if okJoint and typeof(res) == "CFrame" then return res end
+			elseif desc:IsA("AnimationConstraint") then
+				local okConst, res = pcall(function()
+					local att0 = desc.Attachment0
+					local att1 = desc.Attachment1
+					if att0 and att1 then
+						local p0 = att0.Parent
+						local p1 = att1.Parent
+						if p1 == part and p0 and p0:IsA("BasePart") then
+							return p0.CFrame * att0.CFrame * att1.CFrame:Inverse()
+						end
+					end
+				end)
+				if okConst and typeof(res) == "CFrame" then return res end
+			end
+		end
+	end
+	return nil
+end
+
+local function isRigBeingAnimated(model)
+	if not model or not model:IsA("Model") then return false end
+	local ok, descs = pcall(function() return model:GetDescendants() end)
+	if ok and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local okTr, tr = pcall(function() return desc.Transform end)
+				if okTr and typeof(tr) == "CFrame" and tr ~= CFrame.identity then
+					return true
+				end
+			elseif desc:IsA("AnimationConstraint") then
+				local okTr, tr = pcall(function() return desc.Transform end)
+				if okTr and typeof(tr) == "CFrame" and tr ~= CFrame.identity then
+					return true
+				end
+			end
+		end
+	end
+	local anim = model:FindFirstChildOfClass("Humanoid") or model:FindFirstChildOfClass("AnimationController")
+	local animator = anim and anim:FindFirstChildOfClass("Animator")
+	if animator then
+		local okTracks, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if okTracks and tracks and #tracks > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+local function eligible(obj)
+	return obj ~= script
+		and obj ~= workspace.CurrentCamera
+		and not obj:IsA("Terrain")
+		and not isToolboxDescendant(obj)
+		and not isAnimationArtifact(obj)
+end
 
 local function index()
 	currentRevision = 0
@@ -920,6 +1099,19 @@ local function capture(obj, key)
 		if ok then p.Source = text:gsub(string.char(13, 10), string.char(10)):gsub(string.char(13), string.char(10)); warnings[key..":Source"] = nil else warn(key..":Source", obj.Name..": cannot access script source") end
 	end
 	if obj:IsA("MeshPart") then for _, name in ipairs({"MeshId", "MeshContent", "CollisionFidelity", "RenderFidelity", "FluidFidelity"}) do local ok, v = pcall(function() return encode(obj[name]) end); if ok and v then p[name] = v end end end
+	if obj:IsA("BasePart") and isRigLimb(obj) then
+		local m = obj:FindFirstAncestorWhichIsA("Model")
+		if m and isRigBeingAnimated(m) then
+			if baseline[key] and baseline[key].props and baseline[key].props.CFrame then
+				p.CFrame = baseline[key].props.CFrame
+			elseif cachedSnapshot[key] and cachedSnapshot[key].props and cachedSnapshot[key].props.CFrame then
+				p.CFrame = cachedSnapshot[key].props.CFrame
+			else
+				local rest = getRigLimbRestCFrame(obj)
+				if rest then p.CFrame = encode(rest) end
+			end
+		end
+	end
 	local attrs = {}; for name, value in pairs(obj:GetAttributes()) do if name ~= "PT_ObjectId" then local v = encode(value); if v ~= nil then attrs[name] = v end end end
 	local tags = Collection:GetTags(obj); table.sort(tags)
 	local tbAssetId = 0
@@ -969,9 +1161,20 @@ pcall(function()
 		table.clear(selectionConnections)
 		for _, obj in ipairs(Selection:Get()) do
 			if eligible(obj) then
-				dirtyObjects[obj] = true
+				local isLimb = obj:IsA("BasePart") and isRigLimb(obj)
+				local m = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+				if not isLimb and not (m and isRigBeingAnimated(m)) then
+					dirtyObjects[obj] = true
+				end
 				local ok, conn = pcall(function()
-					return obj.Changed:Connect(function()
+					return obj.Changed:Connect(function(prop)
+						if (prop == "CFrame" or prop == "Position" or prop == "Orientation") and obj:IsA("BasePart") and isRigLimb(obj) then
+							return
+						end
+						local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+						if curM and isRigBeingAnimated(curM) then
+							return
+						end
 						dirtyObjects[obj] = true
 					end)
 				end)
@@ -999,7 +1202,12 @@ local function snapshot(forceFull)
 		for key, obj in pairs(objects) do
 			if obj.Parent and (serviceIds[key] or ids[obj.Parent]) then
 				local ok, value = pcall(capture, obj, key)
-				if ok then cachedSnapshot[key] = value else cachedSnapshot[key] = baseline[key] end
+				if ok then
+					cachedSnapshot[key] = value
+				else
+					warn(key..":capture_err", obj.Name .. " (" .. obj.ClassName .. "): capture failed: " .. tostring(value))
+					cachedSnapshot[key] = baseline[key]
+				end
 			end
 		end
 		for key, value in pairs(terrainRecords()) do cachedSnapshot[key] = value end
@@ -1045,7 +1253,14 @@ local function snapshot(forceFull)
 	return cachedSnapshot
 end
 
-local function base() return address.Text:gsub("%s+", ""):gsub("/+$", "") end
+base = function()
+	local a = (address and address.Text or ""):gsub("%s+", ""):gsub("/+$", "")
+	if a == "" or a == "http://" or a == "https://" then
+		a = plugin:GetSetting("PTAddress") or "http://127.0.0.1:8787"
+		a = tostring(a):gsub("%s+", ""):gsub("/+$", "")
+	end
+	return a
+end
 
 local function request(method, payload, renewed)
 	if not alive then return {} end
@@ -1069,7 +1284,7 @@ local function request(method, payload, renewed)
 	return value
 end
 
-local function api(path, method, payload, renewed)
+api = function(path, method, payload, renewed)
 	if not alive then return {} end
 	local reqUrl = base().."/api"..path
 	if (method or "GET") == "GET" then
@@ -1102,7 +1317,10 @@ local function loadMesh(obj, key, value)
 	local success, err = pcall(function()
 		local options = {}; for _, name in ipairs({"CollisionFidelity", "RenderFidelity", "FluidFidelity"}) do if p[name] then options[name] = decode(p[name]) end end
 		local fresh = Assets:CreateMeshPartAsync(source, options); if not fresh then error("Roblox did not return mesh geometry") end
-		obj:ApplyMesh(fresh); fresh:Destroy()
+		local targetCf = (p and p.CFrame and decode(p.CFrame)) or obj.CFrame
+		obj:ApplyMesh(fresh)
+		pcall(function() obj.CFrame = targetCf end)
+		fresh:Destroy()
 	end)
 	if success then meshRetry[key] = nil; warnings[key..":mesh"] = nil
 	else meshRetry[key] = os.clock() + 15; warn(key..":mesh", value.name..": Roblox refused to load mesh; other parts continue syncing") end
@@ -1111,13 +1329,25 @@ end
 local function apply(remote, sent, force)
 	local before = cachedSnapshot
 	local changed = {}
+	local partsToUnanchor = {}
+	local constraintsToEnable = {}
 	for key, record in pairs(remote) do
 		if force or versions[key] ~= record.version or pending[key] or meshRetry[key] or referenceRetry[key] or (appearanceRetry[key] and appearanceRetry[key] <= os.clock()) then
 			changed[key] = {version = record.version, value = force and copy(record.value) or merge(baseline[key], before[key], record.value)}
 		end
 	end
+
+	local totalChanged = 0
+	for _ in pairs(changed) do totalChanged += 1 end
+
+	local createdCount = 0
 	for key, r in pairs(changed) do
 		if r.value and r.value.class ~= "PTTerrainChunk" and not objects[key] then
+			createdCount += 1
+			if totalChanged > 50 and (createdCount % 120 == 0 or createdCount == totalChanged) then
+				status("Creating: " .. formatCount(createdCount) .. "/" .. formatCount(totalChanged) .. "...")
+				task.wait()
+			end
 			if r.value.isToolbox and r.value.assetId and r.value.assetId > 0 then
 				pending[key] = true
 				task.spawn(function()
@@ -1141,8 +1371,21 @@ local function apply(remote, sent, force)
 				end)
 			else
 				local ok, obj = pcall(Instance.new, r.value.class)
+				if not ok and r.value.class == "MeshPart" then
+					local src = meshSource(r.value)
+					if src then
+						ok, obj = pcall(function() return Assets:CreateMeshPartAsync(src) end)
+					end
+				end
 				if ok then
-					if obj:IsA("BasePart") then for _, s in ipairs({"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"}) do obj[s] = Enum.SurfaceType.Smooth end end
+					if obj:IsA("BasePart") then
+						for _, s in ipairs({"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"}) do obj[s] = Enum.SurfaceType.Smooth end
+						obj.Anchored = true
+						if r.value.props then
+							if r.value.props.Size then pcall(function() obj.Size = decode(r.value.props.Size) end) end
+							if r.value.props.CFrame then pcall(function() obj.CFrame = decode(r.value.props.CFrame) end) end
+						end
+					end
 					obj:SetAttribute("PT_ObjectId", key); objects[key] = obj; ids[obj] = key; pending[key] = nil; warnings[key..":create"] = nil
 				else pending[key] = true; warn(key..":create", r.value.name..": class cannot be created via API") end
 			end
@@ -1166,7 +1409,13 @@ local function apply(remote, sent, force)
 			if safe then local ok = pcall(function() item.obj:ScaleTo(value) end); if ok then warnings[item.key..":scale"] = nil else warn(item.key..":scale", item.obj.Name..": model scale unavailable") end end
 		end
 	end
+	local appliedCount = 0
 	for key, r in pairs(changed) do local v = r.value; local obj = objects[key]
+		appliedCount += 1
+		if force and totalChanged > 50 and (appliedCount % 60 == 0 or appliedCount == totalChanged) then
+			status("Loading place: " .. formatCount(appliedCount) .. "/" .. formatCount(totalChanged) .. " (" .. math.floor(appliedCount / totalChanged * 100) .. "%)")
+			task.wait()
+		end
 		if not v then appearanceRetry[key] = nil end
 		if v and obj and not pending[key] then
 			referenceRetry[key] = nil
@@ -1189,7 +1438,30 @@ local function apply(remote, sent, force)
 					if type(value) == "table" and value.t == "Instance" and not objects[value.v] then referenceRetry[key] = true; error("Linked instance still loading") end
 					if name == "Source" and obj:IsA("LuaSourceContainer") then if Editor:GetEditorSource(obj) ~= value then Editor:UpdateSourceAsync(obj, function() return value end) end
 					elseif obj:IsA("Model") and (name == "CFrame" or name == "WorldPivot") then local cf = decode(value); if typeof(cf) == "CFrame" then pcall(function() obj.WorldPivot = cf end) end
-					elseif not equal(encode(obj[name]), value) then obj[name] = decode(value) end
+					elseif name == "Anchored" and obj:IsA("BasePart") then
+						if isCharacterPart(obj) then
+							obj.Anchored = true
+						elseif decode(value) == false then
+							partsToUnanchor[obj] = true
+						else
+							obj.Anchored = true
+						end
+					elseif name == "Enabled" and (obj:IsA("Constraint") or obj:IsA("BallSocketConstraint") or obj:IsA("AnimationConstraint")) and decode(value) == true then
+						constraintsToEnable[obj] = true
+						obj.Enabled = false
+					elseif name == "CFrame" and obj:IsA("BasePart") then
+						local m = obj:FindFirstAncestorWhichIsA("Model")
+						if not force and m and isRigBeingAnimated(m) and isRigLimb(obj) then
+							-- Only suppress CFrame updates during active animation preview to prevent joint conflicts
+						else
+							local targetCf = decode(value)
+							if not equal(encode(obj[name]), encode(targetCf)) then
+								obj[name] = targetCf
+							end
+						end
+					elseif not equal(encode(obj[name]), value) then
+						obj[name] = decode(value)
+					end
 				end)
 				if ok then warnings[key..":"..name] = nil else warn(key..":"..name, v.name.."."..name..": unavailable via API"); if appearanceSet[name] then appearanceRetry[key] = os.clock() + 10 end end
 			end
@@ -1201,6 +1473,19 @@ local function apply(remote, sent, force)
 		elseif not v and obj and not serviceIds[key] then local ok = pcall(function() obj:Destroy() end); if ok then ids[obj] = nil; objects[key] = nil; pending[key] = nil; meshRetry[key] = nil; referenceRetry[key] = nil else warn(key..":delete", obj.Name..": Roblox prevented deletion") end end
 	end
 	for key, r in pairs(changed) do if key:sub(1, 9) == "~Terrain/" then applyTerrain(key, r.value) end end
+
+	-- Safely activate constraints now that attachments and parts are at their true positions
+	for c in pairs(constraintsToEnable) do
+		pcall(function() c.Enabled = true end)
+	end
+	-- Safely unanchor physics parts now that constraints and NoCollision are established
+	for p in pairs(partsToUnanchor) do
+		if not isCharacterPart(p) then
+			pcall(function() p.Anchored = false end)
+		else
+			pcall(function() p.Anchored = true end)
+		end
+	end
 
 	for key, r in pairs(remote) do
 		versions[key] = r.version
@@ -1234,11 +1519,29 @@ local function sendChanges(current, forceFullCompare)
 	end
 
 	if #list > 0 then
-		local BATCH_SIZE = 100
-		for i = 1, #list, BATCH_SIZE do
-			local batch = {}
-			for j = i, math.min(i + BATCH_SIZE - 1, #list) do
-				table.insert(batch, list[j])
+		local batches = {}
+		local curBatch = {}
+		local curBytes = 0
+		for _, item in ipairs(list) do
+			local itemJson = Http:JSONEncode(item)
+			local itemLen = #itemJson
+			if (#curBatch >= 400 or curBytes + itemLen > 650000) and #curBatch > 0 then
+				table.insert(batches, curBatch)
+				curBatch = {}
+				curBytes = 0
+			end
+			table.insert(curBatch, item)
+			curBytes += itemLen
+		end
+		if #curBatch > 0 then
+			table.insert(batches, curBatch)
+		end
+
+		local sentCount = 0
+		for _, batch in ipairs(batches) do
+			sentCount += #batch
+			if #list > 50 then
+				status("Saving to server: " .. formatCount(sentCount) .. "/" .. formatCount(#list) .. " (" .. math.floor(sentCount / #list * 100) .. "%)")
 			end
 			local result = request("POST", {changes = batch, since = currentRevision})
 			if not result.conflict then
@@ -1253,7 +1556,7 @@ local function sendChanges(current, forceFullCompare)
 						versions[ch.id] = currentRevision
 					end
 				end
-				if result.remoteChanges and next(result.remoteChanges) then
+				if not forceFullCompare and result.remoteChanges and next(result.remoteChanges) then
 					apply(result.remoteChanges, current, false)
 				end
 			end
@@ -1303,7 +1606,30 @@ local function focusImportedPlace()
 	end
 end
 
-local function connectSession()
+local function downloadAllObjects(state)
+	if state.has_more and state.total_objects then
+		local allObjects = copy(state.objects or {})
+		local page = state.page or 1
+		local limit = state.limit or 250
+		while state.has_more do
+			page += 1
+			status("Downloading objects: "..formatCount(math.min(page * limit, state.total_objects)).."/"..formatCount(state.total_objects).."...")
+			local pUrl = endpoint .. (endpoint:find("?") and "&" or "?") .. "page=" .. tostring(page) .. "&limit=" .. tostring(limit) .. "&_t=" .. tostring(os.clock())
+			local resp = Http:RequestAsync({Url = pUrl, Method = "GET", Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json"}})
+			if resp.Success then
+				local pData = Http:JSONDecode(resp.Body)
+				for k, v in pairs(pData.objects or {}) do allObjects[k] = v end
+				state.has_more = pData.has_more
+			else
+				break
+			end
+		end
+		state.objects = allObjects
+	end
+	return state
+end
+
+local function connectSession(isCreating)
 	if busy then return end
 	if active then
 		if Run:IsRunning() then status("Stop Play mode before leaving session."); return end
@@ -1339,33 +1665,13 @@ local function connectSession()
 		local state = request("GET")
 
 		-- Support paginated download for massive places
-		if state.has_more and state.total_objects then
-			local allObjects = copy(state.objects or {})
-			local page = state.page or 1
-			local limit = state.limit or 250
-			while state.has_more do
-				page += 1
-				status("Downloading place objects ("..tostring(page * limit).."/"..tostring(state.total_objects)..")...")
-				local pUrl = endpoint .. (endpoint:find("?") and "&" or "?") .. "page=" .. tostring(page) .. "&limit=" .. tostring(limit) .. "&_t=" .. tostring(os.clock())
-				local resp = Http:RequestAsync({Url = pUrl, Method = "GET", Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json"}})
-				if resp.Success then
-					local pData = Http:JSONDecode(resp.Body)
-					for k, v in pairs(pData.objects or {}) do allObjects[k] = v end
-					state.has_more = pData.has_more
-				else
-					break
-				end
-			end
-			state.objects = allObjects
-		end
+		state = downloadAllObjects(state)
 
-		-- If room on server is empty/new, upload local place
-		if state.unchanged or next(state.objects or {}) == nil then
+		-- If creating project or room on server is empty, upload local place
+		if isCreating or state.unchanged or next(state.objects or {}) == nil then
 			status("Dedicated room is empty. Uploading current place as initial state...")
 			state = sendChanges(current, true)
-		end
-
-		if state.objects and next(state.objects) ~= nil then
+		elseif state.objects and next(state.objects) ~= nil then
 			apply(state.objects, current, true)
 		end
 		currentRevision = state.revision or currentRevision
@@ -1445,7 +1751,7 @@ btnConnectProject.MouseButton1Click:Connect(function()
 	plugin:SetSetting("PTRoom", res.roomId)
 	plugin:SetSetting("PTRoomToken:" .. res.roomId, res.token)
 	uiTab = "session"
-	connectSession()
+	connectSession(false)
 end)
 
 -- Create New Project Button Action
@@ -1473,7 +1779,7 @@ btnCreateProject.MouseButton1Click:Connect(function()
 	plugin:SetSetting("PTRoom", res.id)
 	plugin:SetSetting("PTRoomToken:" .. res.id, res.token)
 	uiTab = "session"
-	connectSession()
+	connectSession(true)
 end)
 
 -- Force Push & Pull Buttons Actions
@@ -1513,6 +1819,7 @@ btnForcePull.MouseButton1Click:Connect(function()
 	local ok, err = pcall(function()
 		local current = snapshot(true)
 		local state = request("GET")
+		state = downloadAllObjects(state)
 		apply(state.objects, current, true)
 		status("Place updated from server.")
 	end)
@@ -1639,6 +1946,7 @@ task.spawn(function()
 	else
 		status("Enter server address in Settings tab")
 	end
+	task.spawn(fetchDashStatus)
 	while alive do
 		task.wait(3.0)
 		if not alive then break end
@@ -1713,6 +2021,7 @@ address.FocusLost:Connect(function()
 	yes.Visible = false; no.Visible = false
 	plugin:SetSetting("PTAddress", base()); uiTab = "projects"; local ok, err = pcall(guestEnter)
 	if not ok then status("Failed to connect to new server. "..tostring(err)) else refreshProjectsList() end
+	task.spawn(fetchDashStatus)
 end)
 
 selfNick.FocusLost:Connect(function()
@@ -1889,7 +2198,16 @@ do
 		elseif (now - lastScriptEditTime) < 15 and lastScriptDocName then
 			act = "Editing script: " .. lastScriptDocName
 		elseif #rawSelected > 0 then
-			if #rawSelected == 1 then
+			local animModel = nil
+			for _, item in ipairs(rawSelected) do
+				local m = item:IsA("Model") and item or item:FindFirstAncestorWhichIsA("Model")
+				if m and isRigBeingAnimated(m) then animModel = m; break end
+			end
+			if animModel then
+				local mName = tostring(animModel.Name)
+				if #mName > 22 then mName = mName:sub(1, 20) .. ".." end
+				act = "Animating: " .. mName
+			elseif #rawSelected == 1 then
 				local item = rawSelected[1]
 				local sName = tostring(item.Name)
 				if #sName > 22 then sName = sName:sub(1, 20) .. ".." end
