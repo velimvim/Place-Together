@@ -51,6 +51,7 @@ local alive = true
 local api
 local base
 local fetchDashStatus
+local status = function(s) end
 local localUserId = 0
 pcall(function()
 	local uid = game:GetService("StudioService"):GetUserId()
@@ -666,7 +667,7 @@ local referenceRetry = {}
 local appearanceRetry = {}
 local warnings = {}
 
-local function status(s) setNotice(s) end
+status = function(s) setNotice(s) end
 local function formatCount(n)
 	n = tonumber(n) or 0
 	if n >= 1000000 then
