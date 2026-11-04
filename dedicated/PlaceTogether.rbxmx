@@ -2121,19 +2121,41 @@ end)
 btnForcePush.MouseButton1Click:Connect(function()
 	if not active or busy then return end
 	busy = true
-	status("Pushing local place state to dedicated server...")
+	local origText = btnForcePush.Text
+	status("Preparing local place for push...")
 	local ok, err = pcall(function()
 		local current = snapshot(true)
 		local list = {}
 		for k, v in pairs(current) do
 			table.insert(list, {id = k, version = versions[k] or 0, value = v})
 		end
-		local BATCH_SIZE = 100
-		for i = 1, #list, BATCH_SIZE do
-			local batch = {}
-			for j = i, math.min(i + BATCH_SIZE - 1, #list) do
-				table.insert(batch, list[j])
+
+		local batches = {}
+		local curBatch = {}
+		local curBytes = 0
+		for _, item in ipairs(list) do
+			local itemJson = Http:JSONEncode(item)
+			local itemLen = #itemJson
+			if (#curBatch >= 400 or curBytes + itemLen > 650000) and #curBatch > 0 then
+				table.insert(batches, curBatch)
+				curBatch = {}
+				curBytes = 0
 			end
+			table.insert(curBatch, item)
+			curBytes += itemLen
+		end
+		if #curBatch > 0 then
+			table.insert(batches, curBatch)
+		end
+
+		local sentCount = 0
+		local totalCount = #list
+		for bIdx, batch in ipairs(batches) do
+			sentCount += #batch
+			local pct = math.floor(sentCount / totalCount * 100)
+			status("Pushing to server: " .. formatCount(sentCount) .. "/" .. formatCount(totalCount) .. " (" .. pct .. "%) [Batch " .. bIdx .. "/" .. #batches .. "]")
+			btnForcePush.Text = "Pushing: " .. pct .. "%"
+			task.wait()
 			local res = request("POST", {changes = batch, since = currentRevision})
 			if res and res.revision then
 				currentRevision = res.revision
@@ -2144,8 +2166,9 @@ btnForcePush.MouseButton1Click:Connect(function()
 			end
 		end
 		hasLocalEdits = false
-		status("Successfully pushed place to server! (Rev " .. tostring(currentRevision) .. ")")
+		status("Successfully pushed place to server! (" .. formatCount(totalCount) .. " objects, Rev " .. tostring(currentRevision) .. ")")
 	end)
+	btnForcePush.Text = origText
 	busy = false
 	if not ok then status("Push failed: " .. tostring(err)) end
 end)
