@@ -1786,6 +1786,10 @@ def main():
         httpd = ThreadedHTTPServer(server_address, PlaceTogetherHandler)
     except Exception as e:
         console_log("FATAL", f"Failed to bind to {args.host}:{args.port}: {e}")
+        try:
+            input("\nPress Enter to close window...")
+        except Exception:
+            pass
         sys.exit(1)
 
     console_log("READY", f"Server running on http://{args.host}:{args.port}")
@@ -1802,4 +1806,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        handle_exit_signal(signal.SIGINT, None)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        try:
+            input("\n[ERROR] Server stopped with an error. Press Enter to close window...")
+        except Exception:
+            pass
+        sys.exit(1)
