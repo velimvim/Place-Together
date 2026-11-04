@@ -1001,14 +1001,14 @@ end
 
 local function isCharacterPart(part)
 	if not part or not part:IsA("BasePart") then return false end
-	if part:FindFirstAncestorWhichIsA("Accessory") then return true end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return false end
 	local m = part:FindFirstAncestorWhichIsA("Model")
 	if not m or m == workspace then return false end
 	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
 	if humanoid then return true end
 	if isRigLimb(part) then return true end
 	local name = part.Name
-	if name == "HumanoidRootPart" or name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name:find("Leg") or name:find("Arm") or name:find("Foot") or name:find("Hand") or name == "Handle" then
+	if name == "HumanoidRootPart" or name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name:find("Leg") or name:find("Arm") or name:find("Foot") or name:find("Hand") then
 		return true
 	end
 	return false
@@ -1085,6 +1085,53 @@ local function eligible(obj)
 		and not obj:IsA("Terrain")
 		and not isToolboxDescendant(obj)
 		and not isAnimationArtifact(obj)
+end
+
+local function ensureAccessoryWelds()
+	for _, m in ipairs(workspace:GetDescendants()) do
+		if m:IsA("Model") and (m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")) then
+			for _, acc in ipairs(m:GetChildren()) do
+				if acc:IsA("Accessory") then
+					local h = acc:FindFirstChild("Handle")
+					if h and h:IsA("BasePart") then
+						h.Anchored = false
+						local rc = h:FindFirstChildOfClass("RigidConstraint")
+						local a0 = rc and rc.Attachment0 or h:FindFirstChildOfClass("Attachment")
+						local a1 = rc and rc.Attachment1
+						if not a1 and a0 then
+							for _, d in ipairs(m:GetDescendants()) do
+								if d:IsA("Attachment") and d.Name == a0.Name and d ~= a0 and d.Parent:IsA("BasePart") then
+									a1 = d
+									break
+								end
+							end
+						end
+						if a0 and a1 and a1.Parent and a1.Parent:IsA("BasePart") then
+							local w = h:FindFirstChild("AccessoryWeld")
+							if not w or not w:IsA("Weld") or w.Part1 ~= a1.Parent then
+								if w then pcall(function() w:Destroy() end) end
+								local ok, newWeld = pcall(function()
+									local wld = Instance.new("Weld")
+									wld.Name = "AccessoryWeld"
+									wld.Part0 = h
+									wld.Part1 = a1.Parent
+									wld.C0 = a0.CFrame
+									wld.C1 = a1.CFrame
+									wld.Parent = h
+									return wld
+								end)
+							else
+								pcall(function()
+									w.C0 = a0.CFrame
+									w.C1 = a1.CFrame
+								end)
+							end
+						end
+					end
+				end
+			end
+		end
+	end
 end
 
 local function consolidateEclipseSaves()
@@ -1192,6 +1239,7 @@ end
 
 local function index()
 	consolidateEclipseSaves()
+	ensureAccessoryWelds()
 	currentRevision = 0
 	objects = {}; ids = {}; baseline = {}; versions = {}; pending = {}; meshRetry = {}; referenceRetry = {}; appearanceRetry = {}; warnings = {}
 	table.clear(dirtyObjects)
@@ -1241,7 +1289,7 @@ local function capture(obj, key)
 		if ok then p.Source = text:gsub(string.char(13, 10), string.char(10)):gsub(string.char(13), string.char(10)); warnings[key..":Source"] = nil else warn(key..":Source", obj.Name..": cannot access script source") end
 	end
 	if obj:IsA("MeshPart") then for _, name in ipairs({"MeshId", "MeshContent", "CollisionFidelity", "RenderFidelity", "FluidFidelity"}) do local ok, v = pcall(function() return encode(obj[name]) end); if ok and v then p[name] = v end end end
-	if obj:IsA("BasePart") and isRigLimb(obj) then
+	if obj:IsA("BasePart") and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
 		local m = obj:FindFirstAncestorWhichIsA("Model")
 		if m and isRigBeingAnimated(m) then
 			if baseline[key] and baseline[key].props and baseline[key].props.CFrame then
@@ -1304,13 +1352,14 @@ pcall(function()
 		for _, obj in ipairs(Selection:Get()) do
 			if eligible(obj) then
 				local isLimb = obj:IsA("BasePart") and isRigLimb(obj)
+				local isAcc = obj:IsA("BasePart") and obj:FindFirstAncestorWhichIsA("Accessory") ~= nil
 				local m = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
-				if not isLimb and not (m and isRigBeingAnimated(m)) then
+				if not isLimb and not isAcc and not (m and isRigBeingAnimated(m)) then
 					dirtyObjects[obj] = true
 				end
 				local ok, conn = pcall(function()
 					return obj.Changed:Connect(function(prop)
-						if (prop == "CFrame" or prop == "Position" or prop == "Orientation") and obj:IsA("BasePart") and isRigLimb(obj) then
+						if (prop == "CFrame" or prop == "Position" or prop == "Orientation") and obj:IsA("BasePart") and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
 							return
 						end
 						local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
@@ -1623,7 +1672,7 @@ local function apply(remote, sent, force)
 						obj.Enabled = false
 					elseif name == "CFrame" and obj:IsA("BasePart") then
 						local m = obj:FindFirstAncestorWhichIsA("Model")
-						if not force and m and isRigBeingAnimated(m) and isRigLimb(obj) then
+						if not force and m and isRigBeingAnimated(m) and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
 							-- Only suppress CFrame updates during active animation preview to prevent joint conflicts
 						else
 							local targetCf = decode(value)
@@ -1667,6 +1716,7 @@ local function apply(remote, sent, force)
 		end
 	end
 	consolidateEclipseSaves()
+	ensureAccessoryWelds()
 end
 
 local function blocked(obj, key)
@@ -1848,6 +1898,7 @@ local function connectSession(isCreating)
 			apply(state.objects, current, true)
 		end
 		consolidateEclipseSaves()
+		ensureAccessoryWelds()
 		currentRevision = state.revision or currentRevision
 
 		local after = snapshot(true); for key, value in pairs(after) do if not versions[key] then baseline[key] = value end end
@@ -2081,6 +2132,7 @@ btnForcePull.MouseButton1Click:Connect(function()
 		state = downloadAllObjects(state)
 		apply(state.objects, current, true)
 		consolidateEclipseSaves()
+		ensureAccessoryWelds()
 		status("Place updated from server.")
 	end)
 	busy = false
