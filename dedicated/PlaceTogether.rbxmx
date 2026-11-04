@@ -437,34 +437,6 @@ local activeDelExec = makeButton("Confirm Delete", activeDelActRow, "danger")
 activeDelExec.Size = UDim2.new(0, 110, 0, 26)
 activeDelExec.TextSize = 11
 
-btnDeleteActiveRoom.MouseButton1Click:Connect(function()
-	if not active or room.Text == "" then return end
-	activeDelConfirm.Visible = true
-	btnDeleteActiveRoom.Visible = false
-end)
-
-activeDelCancel.MouseButton1Click:Connect(function()
-	activeDelConfirm.Visible = false
-	btnDeleteActiveRoom.Visible = true
-end)
-
-activeDelExec.MouseButton1Click:Connect(function()
-	if not active or room.Text == "" then return end
-	local curRoom = room.Text
-	status("Deleting project " .. curRoom .. " from server...")
-	local ok, res = pcall(function()
-		return api("/rooms/" .. curRoom .. "/delete", "POST", {password = activeDelPw.Text})
-	end)
-	if ok then
-		status("Project deleted successfully from server.")
-		connectSession()
-		uiTab = "projects"
-		refreshProjectsList()
-	else
-		status("Delete failed: " .. tostring(res))
-	end
-end)
-
 local inviteCard = card(sessionPanel, "Invite")
 local inviteHeader = title("Direct P2P Peer Invite", inviteCard)
 inviteHeader.TextSize = 14
@@ -641,6 +613,10 @@ local function refreshUI(isActive, isLoggedIn, hasInbox, isBusy)
 	btnForcePush.Visible = isActive
 	btnForcePull.Visible = isActive
 	btnFocusBuild.Visible = isActive
+	btnDeleteActiveRoom.Visible = isActive and not activeDelConfirm.Visible
+	if not isActive then
+		activeDelConfirm.Visible = false
+	end
 	incomingCard.Visible = hasInbox
 	retry.Visible = isLoggedIn and not isActive and room.Text ~= ""
 
@@ -654,7 +630,7 @@ local function refreshUI(isActive, isLoggedIn, hasInbox, isBusy)
 			tabStrokes[key].Color = isSelected and palette.cardBorder or palette.line
 		end
 	end
-	for _, b in ipairs({btnConnectProject, btnCreateProject, btnRefreshProjects, btnForcePush, btnForcePull, btnFocusBuild, invite, yes, no, connect, retry, accept, logout}) do
+	for _, b in ipairs({btnConnectProject, btnCreateProject, btnRefreshProjects, btnForcePush, btnForcePull, btnFocusBuild, btnDeleteActiveRoom, activeDelCancel, activeDelExec, invite, yes, no, connect, retry, accept, logout}) do
 		b.Active = not isBusy
 		b.AutoButtonColor = not isBusy
 		b.TextTransparency = isBusy and .45 or 0
@@ -1852,7 +1828,14 @@ local function refreshProjectsList()
 			if ok then
 				status("Project '" .. r.name .. "' deleted successfully.")
 				if room.Text == r.id and active then
-					connectSession()
+					active = false
+					endpoint = nil
+					connect.Text = "Reconnect to Session"
+					room.Text = ""
+					token.Text = ""
+					credential = nil
+					plugin:SetSetting("PTRoom", "")
+					refreshUI(active, loggedIn, inbox ~= nil, busy)
 				end
 				refreshProjectsList()
 			else
@@ -2072,6 +2055,49 @@ accept.MouseButton1Click:Connect(function()
 	busy = true
 	local ok, err = pcall(function() local current = snapshot(true); local state = request("GET"); apply(state.objects, current, true); active = true; connect.Visible = true; accept.Visible = false; status("Server version accepted.") end)
 	busy = false; if not ok then status(tostring(err)) end
+end)
+
+btnDeleteActiveRoom.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	local pName = sessionTitle.Text ~= "" and sessionTitle.Text or room.Text
+	activeDelPrompt.Text = "Permanently delete '" .. pName .. "' from server?"
+	activeDelPw.Text = ""
+	activeDelConfirm.Visible = true
+	btnDeleteActiveRoom.Visible = false
+	activeDelPw:CaptureFocus()
+end)
+
+activeDelCancel.MouseButton1Click:Connect(function()
+	activeDelConfirm.Visible = false
+	btnDeleteActiveRoom.Visible = true
+end)
+
+activeDelExec.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	local curRoom = room.Text
+	local pName = sessionTitle.Text ~= "" and sessionTitle.Text or curRoom
+	status("Deleting active project '" .. pName .. "' from server...")
+	local ok, res = pcall(function()
+		return api("/rooms/" .. curRoom .. "/delete", "POST", {password = activeDelPw.Text})
+	end)
+	if ok then
+		status("Project '" .. pName .. "' deleted successfully from server.")
+		activeDelConfirm.Visible = false
+		btnDeleteActiveRoom.Visible = true
+		activeDelPw.Text = ""
+		active = false
+		endpoint = nil
+		connect.Text = "Reconnect to Session"
+		room.Text = ""
+		token.Text = ""
+		credential = nil
+		plugin:SetSetting("PTRoom", "")
+		uiTab = "projects"
+		refreshUI(active, loggedIn, inbox ~= nil, busy)
+		refreshProjectsList()
+	else
+		status("Delete failed: " .. tostring(res))
+	end
 end)
 
 task.spawn(function()
