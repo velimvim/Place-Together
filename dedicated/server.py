@@ -866,7 +866,11 @@ async function refreshDashboard() {
 
           const hueColor = `hsl(${Math.round(p.hue * 360)}, 75%, 60%)`;
           const isIdle = p.isIdle === true;
-          const actText = p.activity || (p.selected_count && p.selected_count > 0 ? `Selected ${p.selected_count} part(s)` : 'Viewing place');
+          let actText = p.activity || (p.selected_count && p.selected_count > 0 ? `Selected ${p.selected_count} part(s)` : 'Viewing place');
+          if (isIdle && !actText.includes('Idle (')) {
+            const timeStr = formatDur(p.idleTime || 60);
+            actText = (actText === 'Viewing place') ? `Idle (${timeStr})` : `Idle (${timeStr}) · ${actText}`;
+          }
           const dotStyle = isIdle
             ? 'background: #eab308; box-shadow: 0 0 6px #eab308;'
             : 'background: var(--green); box-shadow: 0 0 6px var(--green);';
@@ -923,6 +927,19 @@ async function deleteRoom(id, name, requiresPassword) {
   } catch (err) {
     alert('Request failed: ' + err.message);
   }
+}
+
+function formatDur(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  if (s < 60) return s + 's';
+  if (s < 3600) {
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return (rem > 0 && m < 10) ? (m + 'm ' + rem + 's') : (m + 'm');
+  }
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return m > 0 ? (h + 'h ' + m + 'm') : (h + 'h');
 }
 
 function escapeHtml(str) {
@@ -1205,6 +1222,7 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                                 "hue": p.get("hue", 0.5),
                                 "activity": p.get("activity", "Viewing place"),
                                 "isIdle": bool(p.get("isIdle", False)),
+                                "idleTime": safe_int(p.get("idleTime"), 0),
                                 "selected_count": len(p.get("selected", [])),
                                 "last_seen_seconds": int(now - p.get("time", 0))
                             })
@@ -1598,6 +1616,7 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                         "selected": data.get("selected", []),
                         "activity": activity,
                         "isIdle": is_idle,
+                        "idleTime": safe_int(data.get("idleTime"), 0),
                         "hue": (abs(peer_seed) % 100) / 100.0,
                         "time": now
                     }

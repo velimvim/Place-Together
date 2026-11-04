@@ -83,6 +83,35 @@ pcall(function()
 		lastActionTime = os.clock()
 	end)
 end)
+pcall(function()
+	game:GetService("UserInputService").InputBegan:Connect(function()
+		lastActionTime = os.clock()
+	end)
+end)
+
+local function formatDuration(seconds)
+	seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+	if seconds < 60 then
+		return string.format("%ds", seconds)
+	elseif seconds < 3600 then
+		local m = math.floor(seconds / 60)
+		local s = seconds % 60
+		if s > 0 and m < 10 then
+			return string.format("%dm %ds", m, s)
+		else
+			return string.format("%dm", m)
+		end
+	else
+		local h = math.floor(seconds / 3600)
+		local m = math.floor((seconds % 3600) / 60)
+		if m > 0 then
+			return string.format("%dh %dm", h, m)
+		else
+			return string.format("%dh", h)
+		end
+	end
+end
+
 local uiTab = "projects"
 
 local frame = Instance.new("Frame")
@@ -247,7 +276,7 @@ header.BackgroundTransparency = 1
 header.Parent = frame
 
 local brand = title("PlaceTogether 3.1", header)
-brand.Size = UDim2.new(1, -110, 0, 22)
+brand.Size = UDim2.new(1, -125, 0, 22)
 brand.TextSize = 17
 
 local identity = textLabel("Collaborate 24/7 (Zero-Lag Sync)", 16, header)
@@ -258,8 +287,8 @@ identity.Font = Enum.Font.Gotham
 identity.TextSize = 11
 
 local statusBadge = Instance.new("Frame")
-statusBadge.Size = UDim2.fromOffset(92, 26)
-statusBadge.Position = UDim2.new(1, -92, 0, 6)
+statusBadge.Size = UDim2.fromOffset(115, 26)
+statusBadge.Position = UDim2.new(1, -115, 0, 6)
 statusBadge.BackgroundColor3 = palette.tabBg
 statusBadge.BorderSizePixel = 0
 statusBadge.Parent = header
@@ -1332,7 +1361,7 @@ local function hookHierarchy(service)
 		service.DescendantAdded:Connect(function(obj)
 			if eligible(obj) then
 				dirtyObjects[obj] = true
-				hasLocalEdits = true
+				hasLocalEdits = true; lastActionTime = os.clock()
 				if not ids[obj] then
 					local key = Http:GenerateGUID(false)
 					ids[obj] = key; objects[key] = obj; obj:SetAttribute("PT_ObjectId", key)
@@ -1344,7 +1373,7 @@ local function hookHierarchy(service)
 			if key then
 				dirtyDeleted[key] = true
 				dirtyObjects[obj] = nil
-				hasLocalEdits = true
+				hasLocalEdits = true; lastActionTime = os.clock()
 			end
 		end)
 	end)
@@ -1374,7 +1403,7 @@ pcall(function()
 				local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
 				if not (curM and isRigBeingAnimated(curM)) then
 					dirtyObjects[obj] = true
-					hasLocalEdits = true
+					hasLocalEdits = true; lastActionTime = os.clock()
 				end
 				local ok, conn = pcall(function()
 					return obj.Changed:Connect(function(prop)
@@ -1383,7 +1412,7 @@ pcall(function()
 							return
 						end
 						dirtyObjects[obj] = true
-						hasLocalEdits = true
+						hasLocalEdits = true; lastActionTime = os.clock()
 					end)
 				end)
 				if ok and conn then table.insert(selectionConnections, conn) end
@@ -1395,10 +1424,10 @@ end)
 -- ChangeHistoryService listener (tracks Studio Undo/Redo/Property actions)
 pcall(function()
 	ChangeHistoryService.OnUndo:Connect(function()
-		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end
+		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end; lastActionTime = os.clock()
 	end)
 	ChangeHistoryService.OnRedo:Connect(function()
-		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end
+		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end; lastActionTime = os.clock()
 	end)
 end)
 
@@ -2545,6 +2574,10 @@ do
 				local selCount = peer.selected and #peer.selected or 0
 				actText = selCount > 0 and ("Selected " .. selCount .. " part(s)") or "Viewing place"
 			end
+			if isIdle and not actText:find("Idle%s*%(") then
+				local idleT = peer.idleTime or 60
+				actText = (actText == "Viewing place") and ("Idle (" .. formatDuration(idleT) .. ")") or ("Idle (" .. formatDuration(idleT) .. ") · " .. actText)
+			end
 			actLbl.Text = actText
 			actLbl.Parent = pCard
 		end
@@ -2576,7 +2609,13 @@ do
 			present[peer.id] = true; table.insert(names, peer.name)
 			if enabled then
 				local item = markers[peer.id] or marker(peer); markers[peer.id] = item
-				item.target = vector(peer.position); item.targetLook = vector(peer.look); item.label.Text = peer.name; item.seen = os.clock()
+				item.target = vector(peer.position); item.targetLook = vector(peer.look);
+				local lblText = peer.name
+				if peer.isIdle then
+					local idleT = peer.idleTime or 60
+					lblText = peer.name .. " (Idle " .. formatDuration(idleT) .. ")"
+				end
+				item.label.Text = lblText; item.seen = os.clock()
 				item.selection = {}; for _, key in ipairs(peer.selected or {}) do item.selection[key] = true end
 				for key, box in pairs(item.boxes) do if not item.selection[key] then box:Destroy(); item.boxes[key] = nil end end
 			end
@@ -2606,7 +2645,8 @@ do
 			end
 		end
 
-		local isIdle = (now - lastActionTime > 60)
+		local idleSec = math.max(0, math.floor(now - lastActionTime))
+		local isIdle = (idleSec >= 60)
 		local isPlaying = false
 		pcall(function()
 			isPlaying = game:GetService("RunService"):IsRunning()
@@ -2643,9 +2683,11 @@ do
 
 		if isIdle then
 			if act == "Viewing place" then
-				act = "Idle (away)"
+				local timeStr = formatDuration(idleSec)
+				act = "Idle (" .. timeStr .. ")"
 			else
-				act = "Idle (" .. act .. ")"
+				local timeStr = formatDuration(idleSec)
+				act = "Idle (" .. timeStr .. ") · " .. act
 			end
 		end
 
@@ -2658,7 +2700,8 @@ do
 			selected = selected,
 			userId = localUserId,
 			activity = act,
-			isIdle = isIdle
+			isIdle = isIdle,
+			idleTime = idleSec
 		}
 	end
 
@@ -2697,6 +2740,23 @@ do
 				local currentRoom = room.Text; local currentBase = base()
 				if previousRoom ~= currentRoom or previousBase ~= currentBase then clear() end
 				previousRoom = currentRoom; previousBase = currentBase
+				
+				local nowSec = os.clock()
+				local myIdleSec = math.max(0, math.floor(nowSec - lastActionTime))
+				local myIsIdle = (myIdleSec >= 60)
+				if myIsIdle then
+					dot.BackgroundColor3 = Color3.fromRGB(234, 179, 8)
+					statusBadgeLabel.Text = "IDLE " .. formatDuration(myIdleSec)
+					statusBadgeLabel.TextColor3 = Color3.fromRGB(234, 179, 8)
+					badgeStroke.Color = Color3.fromRGB(234, 179, 8)
+					identity.Text = selfNick.Text .. " · Idle (" .. formatDuration(myIdleSec) .. ")"
+				else
+					dot.BackgroundColor3 = palette.green
+					statusBadgeLabel.Text = "LIVE"
+					statusBadgeLabel.TextColor3 = palette.green
+					badgeStroke.Color = palette.green
+					identity.Text = selfNick.Text .. " · In Session"
+				end
 				
 				local cam = workspace.CurrentCamera
 				local camMoved = false
