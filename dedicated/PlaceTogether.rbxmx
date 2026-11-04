@@ -1001,7 +1001,7 @@ end
 
 local function isCharacterPart(part)
 	if not part or not part:IsA("BasePart") then return false end
-	if part:FindFirstAncestorWhichIsA("Accessory") then return false end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return true end
 	local m = part:FindFirstAncestorWhichIsA("Model")
 	if not m or m == workspace then return false end
 	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
@@ -1085,6 +1085,7 @@ local function eligible(obj)
 		and not obj:IsA("Terrain")
 		and not isToolboxDescendant(obj)
 		and not isAnimationArtifact(obj)
+		and not (obj:IsA("Weld") and obj.Name == "AccessoryWeld")
 end
 
 local function ensureAccessoryWelds()
@@ -1539,7 +1540,7 @@ local function apply(remote, sent, force)
 
 	local createdCount = 0
 	for key, r in pairs(changed) do
-		if r.value and r.value.class ~= "PTTerrainChunk" and not objects[key] then
+		if r.value and r.value.class ~= "PTTerrainChunk" and not objects[key] and not (r.value.class == "Weld" and (r.value.name == "AccessoryWeld" or key:find("AccessoryWeld"))) then
 			createdCount += 1
 			if totalChanged > 50 and (createdCount % 120 == 0 or createdCount == totalChanged) then
 				status("Creating: " .. formatCount(createdCount) .. "/" .. formatCount(totalChanged) .. "...")
