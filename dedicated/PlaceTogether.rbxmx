@@ -1087,7 +1087,111 @@ local function eligible(obj)
 		and not isAnimationArtifact(obj)
 end
 
+local function consolidateEclipseSaves()
+	local ok, ss = pcall(function() return game:GetService("ServerStorage") end)
+	if not ok or not ss then return end
+
+	local roots = {}
+	for _, c in ipairs(ss:GetChildren()) do
+		if c.Name == "Eclipse Animator Saves" and c:IsA("Folder") then
+			table.insert(roots, c)
+		end
+	end
+	if #roots == 0 then return end
+
+	local primary = roots[1]
+
+	-- 1. Merge any loose Eclipse folders directly under ServerStorage into primary
+	for _, child in ipairs(ss:GetChildren()) do
+		if child ~= primary and (child.Name == "EclipseAnimator_Saves" or child.Name == "EclipseAnimator_Backups" or child.Name == "EclipseEffectStorage") and child:IsA("Folder") then
+			local targetSub = primary:FindFirstChild(child.Name)
+			if targetSub and targetSub:IsA("Folder") then
+				for _, itm in ipairs(child:GetChildren()) do
+					itm.Parent = targetSub
+				end
+				local childKey = ids[child]
+				if childKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= childKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[childKey] = targetSub
+					ids[targetSub] = childKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", childKey) end)
+				end
+				pcall(function() child:Destroy() end)
+			else
+				child.Parent = primary
+			end
+		end
+	end
+
+	-- 2. Merge duplicate "Eclipse Animator Saves" root folders into primary
+	for i = 2, #roots do
+		local dup = roots[i]
+		for _, sub in ipairs(dup:GetChildren()) do
+			local targetSub = primary:FindFirstChild(sub.Name)
+			if targetSub and targetSub:IsA("Folder") then
+				for _, item in ipairs(sub:GetChildren()) do
+					local existingItem = targetSub:FindFirstChild(item.Name)
+					if existingItem and existingItem ~= item then
+						pcall(function() existingItem:Destroy() end)
+					end
+					item.Parent = targetSub
+				end
+				local subKey = ids[sub]
+				if subKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= subKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[subKey] = targetSub
+					ids[targetSub] = subKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", subKey) end)
+				end
+				pcall(function() sub:Destroy() end)
+			else
+				sub.Parent = primary
+			end
+		end
+		local dupKey = ids[dup]
+		if dupKey then
+			local oldKey = ids[primary]
+			if oldKey and oldKey ~= dupKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+			objects[dupKey] = primary
+			ids[primary] = dupKey
+			pcall(function() primary:SetAttribute("PT_ObjectId", dupKey) end)
+		end
+		pcall(function() dup:Destroy() end)
+	end
+
+	-- 3. Consolidate duplicate subfolders within primary
+	local seenSub = {}
+	for _, sub in ipairs(primary:GetChildren()) do
+		if sub:IsA("Folder") then
+			if seenSub[sub.Name] then
+				local targetSub = seenSub[sub.Name]
+				for _, item in ipairs(sub:GetChildren()) do
+					local existingItem = targetSub:FindFirstChild(item.Name)
+					if existingItem and existingItem ~= item then
+						pcall(function() existingItem:Destroy() end)
+					end
+					item.Parent = targetSub
+				end
+				local subKey = ids[sub]
+				if subKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= subKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[subKey] = targetSub
+					ids[targetSub] = subKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", subKey) end)
+				end
+				pcall(function() sub:Destroy() end)
+			else
+				seenSub[sub.Name] = sub
+			end
+		end
+	end
+end
+
 local function index()
+	consolidateEclipseSaves()
 	currentRevision = 0
 	objects = {}; ids = {}; baseline = {}; versions = {}; pending = {}; meshRetry = {}; referenceRetry = {}; appearanceRetry = {}; warnings = {}
 	table.clear(dirtyObjects)
@@ -1431,7 +1535,37 @@ local function apply(remote, sent, force)
 	end
 	for key, r in pairs(changed) do local v = r.value; local obj = objects[key]
 		if v and obj then
-			local ok = pcall(function() if obj.Name ~= v.name then obj.Name = v.name end; if not serviceIds[key] then local parent = objects[v.parent]; if not parent then error("Parent unavailable") end; if obj.Parent ~= parent then obj.Parent = parent end end end)
+			local ok = pcall(function()
+				if obj.Name ~= v.name then obj.Name = v.name end
+				if not serviceIds[key] then
+					local parent = objects[v.parent]
+					if not parent then error("Parent unavailable") end
+					if obj.Parent ~= parent then
+						if obj:IsA("Folder") and (parent == game:GetService("ServerStorage") or parent:IsDescendantOf(game:GetService("ServerStorage"))) then
+							local existing = parent:FindFirstChild(v.name)
+							if existing and existing:IsA("Folder") and existing ~= obj then
+								local existingKey = ids[existing]
+								if not existingKey or not remote[existingKey] then
+									for _, ch in ipairs(obj:GetChildren()) do
+										ch.Parent = existing
+									end
+									if existingKey then
+										objects[existingKey] = nil
+										dirtyDeleted[existingKey] = nil
+									end
+									ids[obj] = nil
+									objects[key] = existing
+									ids[existing] = key
+									pcall(function() existing:SetAttribute("PT_ObjectId", key) end)
+									obj:Destroy()
+									obj = existing
+								end
+							end
+						end
+						if obj.Parent ~= parent then obj.Parent = parent end
+					end
+				end
+			end)
 			if ok then pending[key] = nil; warnings[key..":parent"] = nil else pending[key] = true; warn(key..":parent", v.name..": waiting for parent object") end
 		end
 	end
@@ -1532,6 +1666,7 @@ local function apply(remote, sent, force)
 			cachedSnapshot[key] = copy(r.value)
 		end
 	end
+	consolidateEclipseSaves()
 end
 
 local function blocked(obj, key)
@@ -1712,6 +1847,7 @@ local function connectSession(isCreating)
 		elseif state.objects and next(state.objects) ~= nil then
 			apply(state.objects, current, true)
 		end
+		consolidateEclipseSaves()
 		currentRevision = state.revision or currentRevision
 
 		local after = snapshot(true); for key, value in pairs(after) do if not versions[key] then baseline[key] = value end end
@@ -1944,6 +2080,7 @@ btnForcePull.MouseButton1Click:Connect(function()
 		local state = request("GET")
 		state = downloadAllObjects(state)
 		apply(state.objects, current, true)
+		consolidateEclipseSaves()
 		status("Place updated from server.")
 	end)
 	busy = false
