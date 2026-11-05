@@ -702,7 +702,16 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     background: var(--green-bg); color: var(--green);
     padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
   }
-  .dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; box-shadow: 0 0 8px var(--green); }
+  .pulse-badge.offline {
+    background: #2d161a; color: #f87171; border: 1px solid #782832;
+  }
+  .dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; box-shadow: 0 0 8px var(--green); transition: all 0.25s ease; }
+  .dot.offline { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .offline-banner {
+    background: #2d161a; border: 1px solid #782832; color: #fca5a5;
+    padding: 10px 16px; border-radius: 8px; margin-bottom: 20px;
+    font-size: 13px; font-weight: 600; display: none; align-items: center; gap: 10px;
+  }
   .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 28px; }
   .stat-card {
     background: var(--card); border: 1px solid var(--card-border);
@@ -770,9 +779,14 @@ HTML_DASHBOARD = """<!DOCTYPE html>
     <div style="display: flex; align-items: center; gap: 10px;">
       <a href="/PlaceTogether.rbxmx" download class="btn-download">Download Plugin (.rbxmx)</a>
       <button onclick="disableDashboard()" class="btn-toggle-dash" title="Turn off Web Dashboard">Disable Dashboard</button>
-      <div class="pulse-badge"><span class="dot"></span> <span>Online & Syncing</span></div>
+      <div class="pulse-badge" id="server-status-badge"><span class="dot" id="server-status-dot"></span> <span id="server-status-text">Online & Syncing</span></div>
     </div>
   </header>
+
+  <div id="offline-banner" class="offline-banner">
+    <span style="font-size: 16px;">⚠️</span>
+    <span>Server is offline or unreachable. "Online & Syncing" paused. Automatically attempting reconnection...</span>
+  </div>
 
   <div class="stats-grid">
     <div class="stat-card">
@@ -808,10 +822,44 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 let lastRenderedHtml = '';
 
 async function refreshDashboard() {
+  const badge = document.getElementById('server-status-badge');
+  const badgeText = document.getElementById('server-status-text');
+  const badgeDot = document.getElementById('server-status-dot');
+  const banner = document.getElementById('offline-banner');
+  const container = document.getElementById('projects-container');
+
+  function setOffline() {
+    if (badge) badge.className = 'pulse-badge offline';
+    if (badgeDot) badgeDot.className = 'dot offline';
+    if (badgeText) badgeText.textContent = 'Server Offline';
+    if (banner) banner.style.display = 'flex';
+    if (container) container.style.opacity = '0.55';
+    const uptimeEl = document.getElementById('stat-uptime');
+    if (uptimeEl) uptimeEl.textContent = 'Offline';
+  }
+
+  function setOnline() {
+    if (badge) badge.className = 'pulse-badge';
+    if (badgeDot) badgeDot.className = 'dot';
+    if (badgeText) badgeText.textContent = 'Online & Syncing';
+    if (banner) banner.style.display = 'none';
+    if (container) container.style.opacity = '1';
+  }
   try {
-    const res = await fetch('/api/status', { headers: { 'Accept': 'application/json' } });
-    if (!res.ok) return;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch('/api/status', {
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      setOffline();
+      return;
+    }
     const data = await res.json();
+    setOnline();
+
 
     document.getElementById('stat-peers').textContent = data.active_peers;
     document.getElementById('stat-rooms').textContent = data.rooms_count;
@@ -899,7 +947,8 @@ async function refreshDashboard() {
       lastRenderedHtml = html;
     }
   } catch (err) {
-    console.error('Failed to update dashboard:', err);
+    setOffline();
+    console.warn('Dashboard fetch failed (server offline):', err);
   }
 }
 
@@ -919,6 +968,8 @@ async function deleteRoom(id, name, requiresPassword) {
       body: JSON.stringify({ password: pw })
     });
     const data = await res.json();
+    setOnline();
+
     if (res.ok) {
       refreshDashboard();
     } else {
