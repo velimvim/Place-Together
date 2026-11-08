@@ -3,22 +3,25 @@
 	<External>nil</External>
 	<Item class="Script" referent="RBXBB3C8BCE355E44D3ABE8F155BAB255D4">
 		<Properties>
-			<ProtectedString name="Source"><![CDATA[-- PlaceTogether 2.0: Real-time Collaborative Building in Roblox Studio
+			<ProtectedString name="Source"><![CDATA[-- PlaceTogether 3.1: Zero-Lag Dedicated Real-time Collaborative Building
 local Http = game:GetService("HttpService")
 local Editor = game:GetService("ScriptEditorService")
 local Run = game:GetService("RunService")
 local InsertService = game:GetService("InsertService")
+local Selection = game:GetService("Selection")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
 local roots = {"Workspace", "ReplicatedStorage", "ReplicatedFirst", "ServerScriptService", "ServerStorage", "StarterGui", "StarterPack", "StarterPlayer", "Teams", "MaterialService", "TextChatService", "Lighting", "SoundService"}
 local serviceIds = {}; for _, name in ipairs(roots) do serviceIds["@"..name] = true end
 local common = {"Archivable", "TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface", "MaterialVariant"}
 local props = {"Anchored", "CanCollide", "CanTouch", "CanQuery", "Transparency", "Reflectance", "Color", "Material", "Size", "CFrame", "Shape", "MeshId", "TextureID", "TextureId", "Texture", "Face", "Enabled", "Brightness", "Range", "Shadows", "Angle", "SoundId", "Volume", "Looped", "PlaybackSpeed", "Value", "PrimaryPart", "Part0", "Part1", "C0", "C1", "Attachment0", "Attachment1", "Position", "Orientation", "Axis", "SecondaryAxis", "Text", "TextSize", "TextColor3", "BackgroundColor3", "BackgroundTransparency", "BorderSizePixel", "Visible", "AnchorPoint", "Image", "ImageColor3", "CanvasSize", "DisplayOrder", "ResetOnSpawn", "Disabled", "Ambient", "OutdoorAmbient", "ClockTime", "FogEnd", "FogStart", "FogColor"}
 
 local savedAddress = plugin:GetSetting("PTAddress") or ""
-if type(savedAddress) ~= "string" then savedAddress = "" end
+if type(savedAddress) ~= "string" or savedAddress == "" then savedAddress = "http://127.0.0.1:8787" end
 
 local toolbar = plugin:CreateToolbar("PlaceTogether")
 local button = toolbar:CreateButton("PlaceTogether", "Collaborative Building", "")
-local widget = plugin:CreateDockWidgetPluginGuiAsync("PlaceTogetherInvites02", DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 340, 540, 280, 400))
+local widget = plugin:CreateDockWidgetPluginGuiAsync("PlaceTogetherInvites03", DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 360, 580, 290, 420))
 widget.Title = "PlaceTogether"
 
 local palette = {
@@ -44,9 +47,72 @@ local palette = {
 	tabActive = Color3.fromRGB(35, 42, 58),
 }
 
+local alive = true
+local api
+local base
+local fetchDashStatus
+local status = function(s) end
+local localUserId = 0
+pcall(function()
+	local uid = game:GetService("StudioService"):GetUserId()
+	if type(uid) == "number" and uid > 0 then localUserId = uid end
+end)
 local loggedIn = false
 local guestEnter
-local uiTab = "home"
+
+local lastActionTime = os.clock()
+local lastCameraPos = nil
+local lastCameraLook = nil
+local lastScriptDocName = nil
+local lastScriptEditTime = 0
+
+pcall(function()
+	local SES = game:GetService("ScriptEditorService")
+	SES.TextDocumentDidChange:Connect(function(doc)
+		local s = doc:GetScript()
+		if s then
+			lastScriptDocName = s.Name
+			lastScriptEditTime = os.clock()
+			lastActionTime = os.clock()
+		end
+	end)
+end)
+
+pcall(function()
+	Selection.SelectionChanged:Connect(function()
+		lastActionTime = os.clock()
+	end)
+end)
+pcall(function()
+	game:GetService("UserInputService").InputBegan:Connect(function()
+		lastActionTime = os.clock()
+	end)
+end)
+
+local function formatDuration(seconds)
+	seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+	if seconds < 60 then
+		return string.format("%ds", seconds)
+	elseif seconds < 3600 then
+		local m = math.floor(seconds / 60)
+		local s = seconds % 60
+		if s > 0 and m < 10 then
+			return string.format("%dm %ds", m, s)
+		else
+			return string.format("%dm", m)
+		end
+	else
+		local h = math.floor(seconds / 3600)
+		local m = math.floor((seconds % 3600) / 60)
+		if m > 0 then
+			return string.format("%dh %dm", h, m)
+		else
+			return string.format("%dh", h)
+		end
+	end
+end
+
+local uiTab = "projects"
 
 local frame = Instance.new("Frame")
 frame.Name = "PlaceTogetherUI"
@@ -133,14 +199,14 @@ end
 local function title(text, parent)
 	local l = textLabel(text, 22, parent)
 	l.Font = Enum.Font.GothamBold
-	l.TextSize = 16
+	l.TextSize = 15
 	l.TextColor3 = palette.text
 	return l
 end
 
 local function field(placeholder, text, parent)
 	local box = Instance.new("TextBox")
-	box.Size = UDim2.new(1, 0, 0, 38)
+	box.Size = UDim2.new(1, 0, 0, 36)
 	box.Text = text or ""
 	box.PlaceholderText = placeholder
 	box.ClearTextOnFocus = false
@@ -168,7 +234,7 @@ end
 
 local function makeButton(text, parent, kind)
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, 0, 0, 38)
+	b.Size = UDim2.new(1, 0, 0, 36)
 	b.Text = text
 	b.Font = Enum.Font.GothamBold
 	b.TextSize = 13
@@ -209,11 +275,11 @@ header.Position = UDim2.fromOffset(16, 12)
 header.BackgroundTransparency = 1
 header.Parent = frame
 
-local brand = title("PlaceTogether", header)
-brand.Size = UDim2.new(1, -110, 0, 22)
-brand.TextSize = 18
+local brand = title("PlaceTogether 3.1", header)
+brand.Size = UDim2.new(1, -125, 0, 22)
+brand.TextSize = 17
 
-local identity = textLabel("Collaborate in real-time.", 16, header)
+local identity = textLabel("Collaborate 24/7 (Zero-Lag Sync)", 16, header)
 identity.Position = UDim2.fromOffset(0, 24)
 identity.AutomaticSize = Enum.AutomaticSize.None
 identity.TextColor3 = palette.subtle
@@ -221,8 +287,8 @@ identity.Font = Enum.Font.Gotham
 identity.TextSize = 11
 
 local statusBadge = Instance.new("Frame")
-statusBadge.Size = UDim2.fromOffset(92, 26)
-statusBadge.Position = UDim2.new(1, -92, 0, 6)
+statusBadge.Size = UDim2.fromOffset(115, 26)
+statusBadge.Position = UDim2.new(1, -115, 0, 6)
 statusBadge.BackgroundColor3 = palette.tabBg
 statusBadge.BorderSizePixel = 0
 statusBadge.Parent = header
@@ -260,10 +326,11 @@ pad(tabsBar, 3, 3)
 
 local tabButtons = {}
 local tabStrokes = {}
-for i, item in ipairs({{"home", "Together"}, {"settings", "Settings"}}) do
+local tabList = {{"projects", "Projects"}, {"session", "Session"}, {"settings", "Settings"}}
+for i, item in ipairs(tabList) do
 	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(0.5, -2, 1, 0)
-	b.Position = UDim2.new((i - 1) * 0.5, (i == 1 and 0 or 2), 0, 0)
+	b.Size = UDim2.new(1 / #tabList, -2, 1, 0)
+	b.Position = UDim2.new((i - 1) * (1 / #tabList), (i == 1 and 0 or 2), 0, 0)
 	b.Text = item[2]
 	b.Font = Enum.Font.GothamMedium
 	b.TextSize = 12
@@ -275,23 +342,66 @@ for i, item in ipairs({{"home", "Together"}, {"settings", "Settings"}}) do
 	s.Enabled = false
 	tabStrokes[item[1]] = s
 	tabButtons[item[1]] = b
-	b.MouseButton1Click:Connect(function() uiTab = item[1] end)
+	b.MouseButton1Click:Connect(function()
+		uiTab = item[1]
+		if item[1] == "settings" and fetchDashStatus then
+			task.spawn(fetchDashStatus)
+		end
+	end)
 end
 
--- HOME PANEL
-local homePanel = container(body, "Together")
-currentParent = homePanel
+-- ============================================================
+-- 1. PROJECTS TAB (DEDICATED 24/7 SERVER ROOMS)
+-- ============================================================
+local projectsPanel = container(body, "Projects")
 
-local nickHeader = textLabel("YOUR USERNAME (SHARE WITH FRIEND)", 16, homePanel)
-nickHeader.Font = Enum.Font.GothamBold
-nickHeader.TextSize = 10
-nickHeader.TextColor3 = palette.subtle
+-- Join Existing Project Card
+local joinCard = card(projectsPanel, "JoinProjectCard")
+local joinTitle = title("Join Dedicated Project", joinCard)
+local joinSub = textLabel("Connect directly to any room on the remote server.", 24, joinCard)
+joinSub.TextColor3 = palette.subtle
+joinSub.TextSize = 11
 
-local shareNick = field("Connecting...", "", homePanel)
-shareNick.TextEditable = false
+local joinIdHeader = textLabel("PROJECT ID OR NAME", 14, joinCard)
+joinIdHeader.Font = Enum.Font.GothamBold; joinIdHeader.TextSize = 9; joinIdHeader.TextColor3 = palette.subtle
+local projectJoinId = field("e.g. rm_a1b2 or GameName", "", joinCard)
 
-local sessionCard = card(homePanel, "Session")
-local sessionBadge = textLabel("ACTIVE SESSION", 14, sessionCard)
+local joinPwHeader = textLabel("ROOM PASSWORD (IF PROTECTED)", 14, joinCard)
+joinPwHeader.Font = Enum.Font.GothamBold; joinPwHeader.TextSize = 9; joinPwHeader.TextColor3 = palette.subtle
+local projectJoinPassword = field("Password (leave blank if none)", "", joinCard)
+
+local btnConnectProject = makeButton("Connect to Project", joinCard, "primary")
+
+-- Create New Project Card
+local createCard = card(projectsPanel, "CreateProjectCard")
+local createTitle = title("Create New Project", createCard)
+local createSub = textLabel("Creates a persistent room and uploads your current place.", 24, createCard)
+createSub.TextColor3 = palette.subtle
+createSub.TextSize = 11
+
+local createNameHeader = textLabel("NEW PROJECT NAME", 14, createCard)
+createNameHeader.Font = Enum.Font.GothamBold; createNameHeader.TextSize = 9; createNameHeader.TextColor3 = palette.subtle
+local newProjectName = field("e.g. Lobby Redesign", game.Name, createCard)
+
+local createPwHeader = textLabel("PROJECT PASSWORD (RECOMMENDED)", 14, createCard)
+createPwHeader.Font = Enum.Font.GothamBold; createPwHeader.TextSize = 9; createPwHeader.TextColor3 = palette.subtle
+local newProjectPassword = field("Secret password to protect room", "", createCard)
+
+local btnCreateProject = makeButton("Create & Upload Place", createCard, "primary")
+
+-- Available Projects Browser Card
+local browserCard = card(projectsPanel, "BrowserCard")
+local browserTitle = title("Server Rooms Browser", browserCard)
+local btnRefreshProjects = makeButton("Refresh Projects List", browserCard)
+local projectsListFrame = container(browserCard, "ProjectsList")
+
+-- ============================================================
+-- 2. SESSION TAB (ACTIVE COLLABORATION & PEER INVITES)
+-- ============================================================
+local sessionPanel = container(body, "Session")
+
+local sessionCard = card(sessionPanel, "Session")
+local sessionBadge = textLabel("ACTIVE DEDICATED SESSION", 14, sessionCard)
 sessionBadge.Font = Enum.Font.GothamBold
 sessionBadge.TextSize = 9
 sessionBadge.TextColor3 = palette.green
@@ -301,24 +411,73 @@ local sessionSubtitle = textLabel("Real-time changes are synchronized across pee
 sessionSubtitle.TextColor3 = palette.muted
 sessionSubtitle.TextSize = 12
 
-local participantsText = textLabel("Participants will appear once connected.", 28, sessionCard)
+local peersHeader = textLabel("ACTIVE PARTICIPANTS", 16, sessionCard)
+peersHeader.Font = Enum.Font.GothamBold
+peersHeader.TextSize = 10
+peersHeader.TextColor3 = palette.subtle
+
+local peersFrame = Instance.new("Frame")
+peersFrame.Name = "PeersFrame"
+peersFrame.Size = UDim2.new(1, 0, 0, 0)
+peersFrame.AutomaticSize = Enum.AutomaticSize.Y
+peersFrame.BackgroundTransparency = 1
+peersFrame.Parent = sessionCard
+stack(peersFrame, 6)
+
+local participantsText = textLabel("No other participants connected yet.", 22, peersFrame)
 participantsText.TextColor3 = palette.subtle
 participantsText.TextSize = 12
 
+local btnFocusBuild = makeButton("Center Camera on Build", sessionCard)
+local btnForcePush = makeButton("Force Push Local Place to Server", sessionCard)
+local btnForcePull = makeButton("Force Pull / Reload from Server", sessionCard)
 local connect = makeButton("Leave Session", sessionCard, "danger")
-connect.Visible = false
 
-local inviteCard = card(homePanel, "Invite")
-local inviteHeader = title("Invite Peer", inviteCard)
-inviteHeader.TextSize = 15
+local btnDeleteActiveRoom = makeButton("Delete Active Project from Server", sessionCard, "danger")
+btnDeleteActiveRoom.Size = UDim2.new(1, 0, 0, 28)
+btnDeleteActiveRoom.TextSize = 11
+
+local activeDelConfirm = container(sessionCard, "ActiveDelConfirm")
+activeDelConfirm.Visible = false
+activeDelConfirm.BackgroundColor3 = palette.dangerBg
+pad(activeDelConfirm, 6, 6)
+corner(activeDelConfirm, 6)
+stroke(activeDelConfirm, palette.dangerBorder, 1)
+
+local activeDelPrompt = textLabel("Permanently delete this project from server?", 20, activeDelConfirm)
+activeDelPrompt.TextColor3 = Color3.fromRGB(252, 165, 165)
+activeDelPrompt.TextSize = 11
+
+local activeDelPw = field("Password (leave blank if none)", "", activeDelConfirm)
+activeDelPw.Size = UDim2.new(1, 0, 0, 26)
+
+local activeDelActRow = container(activeDelConfirm, "ActiveDelActRow")
+activeDelActRow.Size = UDim2.new(1, 0, 0, 28)
+local activeDelActLayout = Instance.new("UIListLayout")
+activeDelActLayout.FillDirection = Enum.FillDirection.Horizontal
+activeDelActLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+activeDelActLayout.Padding = UDim.new(0, 8)
+activeDelActLayout.Parent = activeDelActRow
+
+local activeDelCancel = makeButton("Cancel", activeDelActRow)
+activeDelCancel.Size = UDim2.new(0, 70, 0, 26)
+activeDelCancel.TextSize = 11
+
+local activeDelExec = makeButton("Confirm Delete", activeDelActRow, "danger")
+activeDelExec.Size = UDim2.new(0, 110, 0, 26)
+activeDelExec.TextSize = 11
+
+local inviteCard = card(sessionPanel, "Invite")
+local inviteHeader = title("Direct P2P Peer Invite", inviteCard)
+inviteHeader.TextSize = 14
 
 local nick = field("Friend's username in plugin", "", inviteCard)
-local invite = makeButton("Send Invitation", inviteCard, "primary")
-local inviteStatus = textLabel("Ask your friend for their username shown in their plugin.", 28, inviteCard)
+local invite = makeButton("Send Direct Invitation", inviteCard)
+local inviteStatus = textLabel("Invite friend by their Roblox username.", 24, inviteCard)
 inviteStatus.TextColor3 = palette.subtle
 inviteStatus.TextSize = 11
 
-local incomingCard = card(homePanel, "Incoming")
+local incomingCard = card(sessionPanel, "Incoming")
 local incomingTitle = title("Incoming Invitation", incomingCard)
 incomingTitle.TextColor3 = palette.accent
 
@@ -328,13 +487,14 @@ local yes = makeButton("Accept in Empty Place", incomingCard, "primary")
 local no = makeButton("Decline", incomingCard)
 yes.Visible = false; no.Visible = false
 
-local retry = makeButton("Reconnect to Session", homePanel)
+local retry = makeButton("Reconnect to Session", sessionPanel)
 retry.Visible = false
-
-local accept = makeButton("Accept Server Version", homePanel)
+local accept = makeButton("Accept Server Version", sessionPanel)
 accept.Visible = false
 
--- SETTINGS PANEL
+-- ============================================================
+-- 3. SETTINGS TAB
+-- ============================================================
 local settingsPanel = container(body, "Settings")
 currentParent = settingsPanel
 title("Settings")
@@ -350,36 +510,80 @@ selfNickHint.Font = Enum.Font.Gotham
 selfNickHint.TextSize = 11
 selfNickHint.TextColor3 = palette.subtle
 
-local addressHeader = textLabel("HOST SERVER ADDRESS", 16)
+local addressHeader = textLabel("SERVER ADDRESS (VPS OR LOCAL)", 16)
 addressHeader.Font = Enum.Font.GothamBold
 addressHeader.TextSize = 10
 addressHeader.TextColor3 = palette.subtle
 
 local address = field("http://...", savedAddress)
-local addressHint = textLabel("Both participants must enter the same server address.", 22)
+local addressHint = textLabel("Remote Linux/Windows VPS (e.g. http://194.87.x.x:8787) or localhost.", 28)
 addressHint.Font = Enum.Font.Gotham
 addressHint.TextSize = 11
 addressHint.TextColor3 = palette.subtle
 
 local presenceToggle = makeButton("Peer Cursors: On")
-local logout = makeButton("Reconnect to Server")
+local logout = makeButton("Check Connection & Refresh")
+local dashToggle = makeButton("Web Dashboard: Checking...")
+local isDashEnabled = false
+
+local function updateDashButton(state)
+	isDashEnabled = (state == true)
+	if isDashEnabled then
+		dashToggle.Text = "Web Dashboard: Enabled"
+		dashToggle.TextColor3 = palette.green
+	else
+		dashToggle.Text = "Web Dashboard: Disabled"
+		dashToggle.TextColor3 = palette.subtle
+	end
+end
+
+fetchDashStatus = function()
+	if not api then return end
+	task.spawn(function()
+		local ok, cfg = pcall(function()
+			return api("/config/dashboard", "GET")
+		end)
+		if ok and type(cfg) == "table" and cfg.enabled ~= nil then
+			updateDashButton(cfg.enabled == true)
+		else
+			dashToggle.Text = "Web Dashboard: Disabled"
+			dashToggle.TextColor3 = palette.subtle
+		end
+	end)
+end
+
+dashToggle.MouseButton1Click:Connect(function()
+	if not api then
+		status("Please wait, plugin is initializing...")
+		return
+	end
+	dashToggle.Text = "Updating..."
+	task.spawn(function()
+		local ok, res = pcall(function()
+			return api("/config/dashboard", "POST", {enabled = not isDashEnabled})
+		end)
+		if ok and type(res) == "table" and res.enabled ~= nil then
+			updateDashButton(res.enabled == true)
+			status("Web Dashboard " .. (res.enabled and "enabled" or "disabled") .. " on server.")
+		else
+			updateDashButton(isDashEnabled)
+			local err = (not ok and tostring(res)) or (type(res) == "table" and res.error) or "Server error"
+			status("Failed to toggle dashboard: " .. tostring(err))
+		end
+	end)
+end)
 
 local creditsCard = card(settingsPanel, "CreditsCard")
-local credTitle = title("PlaceTogether Credits", creditsCard)
+local credTitle = title("PlaceTogether Dedicated 3.1", creditsCard)
 credTitle.TextSize = 14
 
-local credSub = textLabel("Authors & Contributors", 14, creditsCard)
+local credSub = textLabel("Zero-Lag Event-Driven Sync Edition", 14, creditsCard)
 credSub.Font = Enum.Font.Gotham
 credSub.TextSize = 11
 credSub.TextColor3 = palette.subtle
 
 local dev1 = textLabel("  @simonpiay43", 22, creditsCard); dev1.TextColor3 = palette.text; dev1.Font = Enum.Font.GothamMedium; dev1.TextSize = 12
 local dev2 = textLabel("  @MNKPO57", 22, creditsCard); dev2.TextColor3 = palette.text; dev2.Font = Enum.Font.GothamMedium; dev2.TextSize = 12
-
-local testersHeader = textLabel("TESTERS", 16, creditsCard)
-testersHeader.TextColor3 = palette.subtle; testersHeader.Font = Enum.Font.GothamBold; testersHeader.TextSize = 10
-
-local tester1 = textLabel("  @Thcjnvh", 22, creditsCard); tester1.TextColor3 = palette.accent; tester1.Font = Enum.Font.GothamMedium; tester1.TextSize = 12
 
 local footer = Instance.new("Frame")
 footer.Position = UDim2.new(0, 16, 1, -44)
@@ -391,7 +595,7 @@ corner(footer, 8)
 stroke(footer, palette.line, 1)
 pad(footer, 12, 0)
 
-local notice = textLabel("Connecting to server...", 36, footer)
+local notice = textLabel("Ready to collaborate.", 36, footer)
 notice.Size = UDim2.fromScale(1, 1)
 notice.AutomaticSize = Enum.AutomaticSize.None
 notice.TextSize = 11
@@ -400,7 +604,7 @@ notice.TextColor3 = palette.muted
 notice.TextTruncate = Enum.TextTruncate.AtEnd
 notice.TextYAlignment = Enum.TextYAlignment.Center
 
-local room = Instance.new("TextBox"); room.Text = ""
+local room = Instance.new("TextBox"); room.Text = plugin:GetSetting("PTRoom") or ""
 local token = Instance.new("TextBox"); token.Text = plugin:GetSetting("PTInviteToken:"..address.Text) or ""
 local setup = Instance.new("TextBox"); setup.Text = ""
 
@@ -412,9 +616,9 @@ local function setNotice(message)
 end
 
 local function refreshUI(isActive, isLoggedIn, hasInbox, isBusy)
-	homePanel.Visible = uiTab == "home"
+	projectsPanel.Visible = uiTab == "projects"
+	sessionPanel.Visible = uiTab == "session"
 	settingsPanel.Visible = uiTab == "settings"
-	if shareNick.Text ~= selfNick.Text then shareNick.Text = selfNick.Text end
 	identity.Text = isLoggedIn and (selfNick.Text..(isActive and " · In Session" or " · Ready")) or "Connecting to server..."
 
 	if isActive then
@@ -436,6 +640,13 @@ local function refreshUI(isActive, isLoggedIn, hasInbox, isBusy)
 
 	sessionCard.Visible = isActive
 	connect.Visible = isActive
+	btnForcePush.Visible = isActive
+	btnForcePull.Visible = isActive
+	btnFocusBuild.Visible = isActive
+	btnDeleteActiveRoom.Visible = isActive and not activeDelConfirm.Visible
+	if not isActive then
+		activeDelConfirm.Visible = false
+	end
 	incomingCard.Visible = hasInbox
 	retry.Visible = isLoggedIn and not isActive and room.Text ~= ""
 
@@ -449,7 +660,7 @@ local function refreshUI(isActive, isLoggedIn, hasInbox, isBusy)
 			tabStrokes[key].Color = isSelected and palette.cardBorder or palette.line
 		end
 	end
-	for _, b in ipairs({invite, yes, no, connect, retry, accept, logout}) do
+	for _, b in ipairs({btnConnectProject, btnCreateProject, btnRefreshProjects, btnForcePush, btnForcePull, btnFocusBuild, btnDeleteActiveRoom, activeDelCancel, activeDelExec, invite, yes, no, connect, retry, accept, logout}) do
 		b.Active = not isBusy
 		b.AutoButtonColor = not isBusy
 		b.TextTransparency = isBusy and .45 or 0
@@ -459,14 +670,22 @@ end
 button.Click:Connect(function() widget.Enabled = not widget.Enabled end)
 refreshUI(false, false, false, false)
 
--- CORE SYNC ENGINE
+-- ============================================================
+-- HIGH-PERFORMANCE ZERO-LAG SYNC ENGINE
+-- ============================================================
 local active = false
 local busy = false
 local restoreSuppressed = false
 local objects, ids, baseline, versions = {}, {}, {}, {}
-local dirtyTerrainChunks = {}
 local endpoint, credential
 local currentRevision = 0
+
+-- DIRTY TRACKING QUEUES (EVENT-DRIVEN: 0% CPU WHEN IDLE)
+local dirtyObjects = {}
+local dirtyDeleted = {}
+local hasLocalEdits = false
+local cachedSnapshot = {}
+local initialScanDone = false
 
 local Reflection = game:GetService("ReflectionService")
 local Assets = game:GetService("AssetService")
@@ -478,7 +697,19 @@ local referenceRetry = {}
 local appearanceRetry = {}
 local warnings = {}
 
-local function status(s) setNotice(s) end
+status = function(s) setNotice(s) end
+local function formatCount(n)
+	n = tonumber(n) or 0
+	if n >= 1000000 then
+		local m = n / 1000000
+		return string.format(m >= 10 and "%.0fM" or "%.1fM", m):gsub("%.0M", "M")
+	elseif n >= 1000 then
+		local k = n / 1000
+		return string.format(k >= 10 and "%.0fk" or "%.1fk", k):gsub("%.0k", "k")
+	else
+		return tostring(n)
+	end
+end
 local function warn(key, message) warnings[key] = message end
 local function warningText()
 	local count = 0; local sample = {}
@@ -529,9 +760,12 @@ local function acknowledged(remote, desired, actual)
 	return result
 end
 
-local terrainCache, terrainKnown = {}, {}
-local terrainReadAt = 0
-local terrainForce = true
+-- ============================================================
+-- OPTIMIZED TERRAIN ENGINE (REACTIVE ONLY - NO IDLE VOXEL SCANS)
+-- ============================================================
+local terrainCache = {}
+local terrainKnown = {}
+local dirtyTerrainChunks = {}
 local CHUNK, VOXELS = 64, 16
 
 local function terrainKey(x, y, z) return "~Terrain/"..x.."/"..y.."/"..z end
@@ -578,8 +812,13 @@ local function writeTerrain(origin, runs)
 	workspace.Terrain:WriteVoxelChannels(terrainRegion(origin), 4, channels)
 end
 
-local function terrainReset() terrainCache = {}; terrainKnown = {}; terrainReadAt = 0; terrainForce = true end
+local function terrainReset()
+	terrainCache = {}
+	terrainKnown = {}
+	table.clear(dirtyTerrainChunks)
+end
 
+-- PURE EVENT-DRIVEN TERRAIN: only triggers when user actually sculpts or paints
 pcall(function()
 	workspace.Terrain.TerrainModified:Connect(function(region)
 		pcall(function()
@@ -588,48 +827,23 @@ pcall(function()
 			local y0 = math.floor((minV.Y * 4) / CHUNK) * CHUNK; local y1 = math.floor((maxV.Y * 4) / CHUNK) * CHUNK
 			local z0 = math.floor((minV.Z * 4) / CHUNK) * CHUNK; local z1 = math.floor((maxV.Z * 4) / CHUNK) * CHUNK
 			for x = x0, x1, CHUNK do for y = y0, y1, CHUNK do for z = z0, z1, CHUNK do
-						dirtyTerrainChunks[terrainKey(x, y, z)] = {x, y, z}
-					end end end
+				dirtyTerrainChunks[terrainKey(x, y, z)] = {x, y, z}
+			end end end
 		end)
 	end)
-	workspace.Terrain.Changed:Connect(function() terrainForce = true end)
 end)
 
 local function terrainRecords()
-	-- ИСПРАВЛЕНИЕ: Резервное сканирование ландшафта (если TerrainModified не срабатывает)
-	pcall(function()
-		local cam = workspace.CurrentCamera
-		if cam and cam.Focus then
-			local p = cam.Focus.Position
-			local cx, cy, cz = math.floor(p.X / CHUNK)*CHUNK, math.floor(p.Y / CHUNK)*CHUNK, math.floor(p.Z / CHUNK)*CHUNK
-			local radius = CHUNK * 2
-			for x = cx - radius, cx + radius, CHUNK do
-				for y = cy - radius, cy + radius, CHUNK do
-					for z = cz - radius, cz + radius, CHUNK do
-						local key = terrainKey(x, y, z)
-						-- Добавляем в сканирование неизвестные куски или если есть форсированное обновление
-						if not terrainKnown[key] or terrainForce then
-							dirtyTerrainChunks[key] = {x, y, z}
-						end
-					end
-				end
-			end
-		end
-	end)
-
-	if next(dirtyTerrainChunks) then
-		for key, origin in pairs(dirtyTerrainChunks) do
-			local value = readTerrain(origin); terrainCache[key] = value
-			if value or terrainKnown[key] then terrainKnown[key] = origin end
-			dirtyTerrainChunks[key] = nil
-		end
+	-- FAST PATH: If no terrain was modified by the user, return cache instantly (< 0.001ms)
+	if not next(dirtyTerrainChunks) then
 		return terrainCache
 	end
-	if not terrainForce and os.clock() - terrainReadAt < 1.5 then return terrainCache end
-	terrainForce = false; terrainReadAt = os.clock()
-	local scan = {}; for key, origin in pairs(terrainKnown) do scan[key] = origin end
-	for key, origin in pairs(scan) do
-		local value = readTerrain(origin); terrainCache[key] = value; if value or terrainKnown[key] then terrainKnown[key] = origin end
+
+	for key, origin in pairs(dirtyTerrainChunks) do
+		local value = readTerrain(origin)
+		terrainCache[key] = value
+		if value or terrainKnown[key] then terrainKnown[key] = origin end
+		dirtyTerrainChunks[key] = nil
 	end
 	return terrainCache
 end
@@ -759,11 +973,317 @@ local function isToolboxDescendant(obj)
 	return false
 end
 
-local function eligible(obj) return obj ~= script and obj ~= workspace.CurrentCamera and not obj:IsA("Terrain") and not isToolboxDescendant(obj) end
+local function isAnimationArtifact(obj)
+	if not obj then return false end
+	local name = obj.Name
+	if name == "CameraRig" or name == "RootCam" or name == "TemporaryScriptFolder" then
+		return true
+	end
+	return false
+end
+
+local function isRigLimb(part)
+	if not part or not part:IsA("BasePart") then return false end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return false end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if not humanoid or part.Name == "HumanoidRootPart" or part == m.PrimaryPart then return false end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return false end
+
+	-- 1. Direct joint check
+	local ok, joints = pcall(function() return part:GetJoints() end)
+	if ok and joints then
+		for _, joint in ipairs(joints) do
+			if joint:IsA("Motor6D") and (joint.Part1 == part or joint.Part0 == part) then
+				return true
+			end
+		end
+	end
+
+	-- 2. Safe descendant traversal: EVERY property access wrapped in pcall
+	local okD, descs = pcall(function() return m:GetDescendants() end)
+	if okD and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local ok1, p1 = pcall(function() return desc.Part1 end)
+				local ok0, p0 = pcall(function() return desc.Part0 end)
+				if (ok1 and p1 == part) or (ok0 and p0 == part) then return true end
+			elseif desc:IsA("AnimationConstraint") then
+				local okAtt1, att1 = pcall(function() return desc.Attachment1 end)
+				if okAtt1 and att1 and att1.Parent == part then return true end
+				local okAtt0, att0 = pcall(function() return desc.Attachment0 end)
+				if okAtt0 and att0 and att0.Parent == part then return true end
+			elseif desc:IsA("Constraint") then
+				local okAtt1, att1 = pcall(function() return desc.Attachment1 end)
+				if okAtt1 and att1 and att1:IsDescendantOf(part) then return true end
+			end
+		end
+	end
+
+	-- 3. Standard R15/R6 limb name fallback
+	local name = part.Name
+	if name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name == "Torso"
+		or name:find("Arm") or name:find("Leg") or name:find("Hand") or name:find("Foot") then
+		return true
+	end
+
+	return false
+end
+
+local function isCharacterPart(part)
+	if not part or not part:IsA("BasePart") then return false end
+	if part:FindFirstAncestorWhichIsA("Accessory") then return true end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return false end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if humanoid then return true end
+	if isRigLimb(part) then return true end
+	local name = part.Name
+	if name == "HumanoidRootPart" or name == "Head" or name == "UpperTorso" or name == "LowerTorso" or name:find("Leg") or name:find("Arm") or name:find("Foot") or name:find("Hand") then
+		return true
+	end
+	return false
+end
+
+local function getRigLimbRestCFrame(part)
+	if not part or not part:IsA("BasePart") then return nil end
+	local m = part:FindFirstAncestorWhichIsA("Model")
+	if not m or m == workspace then return nil end
+	local humanoid = m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")
+	if not humanoid or part.Name == "HumanoidRootPart" or part == m.PrimaryPart then return nil end
+
+	local ok, descs = pcall(function() return m:GetDescendants() end)
+	if ok and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local okJoint, res = pcall(function()
+					if desc.Part1 == part and desc.Part0 and desc.Part0:IsA("BasePart") then
+						return desc.Part0.CFrame * desc.C0 * desc.C1:Inverse()
+					end
+				end)
+				if okJoint and typeof(res) == "CFrame" then return res end
+			elseif desc:IsA("AnimationConstraint") then
+				local okConst, res = pcall(function()
+					local att0 = desc.Attachment0
+					local att1 = desc.Attachment1
+					if att0 and att1 then
+						local p0 = att0.Parent
+						local p1 = att1.Parent
+						if p1 == part and p0 and p0:IsA("BasePart") then
+							return p0.CFrame * att0.CFrame * att1.CFrame:Inverse()
+						end
+					end
+				end)
+				if okConst and typeof(res) == "CFrame" then return res end
+			end
+		end
+	end
+	return nil
+end
+
+local function isRigBeingAnimated(model)
+	if not model or not model:IsA("Model") then return false end
+	local ok, descs = pcall(function() return model:GetDescendants() end)
+	if ok and descs then
+		for _, desc in ipairs(descs) do
+			if desc:IsA("Motor6D") then
+				local okTr, tr = pcall(function() return desc.Transform end)
+				if okTr and typeof(tr) == "CFrame" and tr ~= CFrame.identity then
+					return true
+				end
+			elseif desc:IsA("AnimationConstraint") then
+				local okTr, tr = pcall(function() return desc.Transform end)
+				if okTr and typeof(tr) == "CFrame" and tr ~= CFrame.identity then
+					return true
+				end
+			end
+		end
+	end
+	local anim = model:FindFirstChildOfClass("Humanoid") or model:FindFirstChildOfClass("AnimationController")
+	local animator = anim and anim:FindFirstChildOfClass("Animator")
+	if animator then
+		local okTracks, tracks = pcall(function() return animator:GetPlayingAnimationTracks() end)
+		if okTracks and tracks and #tracks > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+local function eligible(obj)
+	return obj ~= script
+		and obj ~= workspace.CurrentCamera
+		and not obj:IsA("Terrain")
+		and not isToolboxDescendant(obj)
+		and not isAnimationArtifact(obj)
+		and not (obj:IsA("Weld") and obj.Name == "AccessoryWeld")
+end
+
+local function ensureAccessoryWelds()
+	for _, m in ipairs(workspace:GetDescendants()) do
+		if m:IsA("Model") and (m:FindFirstChildOfClass("Humanoid") or m:FindFirstChildOfClass("AnimationController")) then
+			local beingAnimated = isRigBeingAnimated(m)
+			for _, acc in ipairs(m:GetChildren()) do
+				if acc:IsA("Accessory") then
+					local h = acc:FindFirstChild("Handle")
+					if h and h:IsA("BasePart") then
+						local rc = h:FindFirstChildOfClass("RigidConstraint")
+						local a0 = rc and rc.Attachment0 or h:FindFirstChildOfClass("Attachment")
+						local a1 = rc and rc.Attachment1
+						if not a1 and a0 then
+							for _, d in ipairs(m:GetDescendants()) do
+								if d:IsA("Attachment") and d.Name == a0.Name and d ~= a0 and d.Parent:IsA("BasePart") then
+									a1 = d
+									break
+								end
+							end
+						end
+						if a1 and a1.Parent and a1.Parent:IsA("BasePart") then
+							local limb = a1.Parent
+							local w = h:FindFirstChild("AccessoryWeld")
+							if not beingAnimated or not w or not w:IsA("Weld") or w.Part1 ~= limb then
+								local c0 = a0 and a0.CFrame or CFrame.new()
+								-- Mathematically preserve exact visual position: Part0.CFrame * C0 = Part1.CFrame * C1
+								local c1 = limb.CFrame:Inverse() * h.CFrame * c0
+								if not w or not w:IsA("Weld") or w.Part1 ~= limb then
+									if w then pcall(function() w:Destroy() end) end
+									pcall(function()
+										local wld = Instance.new("Weld")
+										wld.Name = "AccessoryWeld"
+										wld.Part0 = h
+										wld.Part1 = limb
+										wld.C0 = c0
+										wld.C1 = c1
+										wld.Parent = h
+									end)
+								else
+									pcall(function()
+										w.C0 = c0
+										w.C1 = c1
+									end)
+								end
+							end
+						end
+						pcall(function() h.Anchored = false end)
+					end
+				end
+			end
+		end
+	end
+end
+
+local function consolidateEclipseSaves()
+	local ok, ss = pcall(function() return game:GetService("ServerStorage") end)
+	if not ok or not ss then return end
+
+	local roots = {}
+	for _, c in ipairs(ss:GetChildren()) do
+		if c.Name == "Eclipse Animator Saves" and c:IsA("Folder") then
+			table.insert(roots, c)
+		end
+	end
+	if #roots == 0 then return end
+
+	local primary = roots[1]
+
+	-- 1. Merge any loose Eclipse folders directly under ServerStorage into primary
+	for _, child in ipairs(ss:GetChildren()) do
+		if child ~= primary and (child.Name == "EclipseAnimator_Saves" or child.Name == "EclipseAnimator_Backups" or child.Name == "EclipseEffectStorage") and child:IsA("Folder") then
+			local targetSub = primary:FindFirstChild(child.Name)
+			if targetSub and targetSub:IsA("Folder") then
+				for _, itm in ipairs(child:GetChildren()) do
+					itm.Parent = targetSub
+				end
+				local childKey = ids[child]
+				if childKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= childKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[childKey] = targetSub
+					ids[targetSub] = childKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", childKey) end)
+				end
+				pcall(function() child:Destroy() end)
+			else
+				child.Parent = primary
+			end
+		end
+	end
+
+	-- 2. Merge duplicate "Eclipse Animator Saves" root folders into primary
+	for i = 2, #roots do
+		local dup = roots[i]
+		for _, sub in ipairs(dup:GetChildren()) do
+			local targetSub = primary:FindFirstChild(sub.Name)
+			if targetSub and targetSub:IsA("Folder") then
+				for _, item in ipairs(sub:GetChildren()) do
+					local existingItem = targetSub:FindFirstChild(item.Name)
+					if existingItem and existingItem ~= item then
+						pcall(function() existingItem:Destroy() end)
+					end
+					item.Parent = targetSub
+				end
+				local subKey = ids[sub]
+				if subKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= subKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[subKey] = targetSub
+					ids[targetSub] = subKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", subKey) end)
+				end
+				pcall(function() sub:Destroy() end)
+			else
+				sub.Parent = primary
+			end
+		end
+		local dupKey = ids[dup]
+		if dupKey then
+			local oldKey = ids[primary]
+			if oldKey and oldKey ~= dupKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+			objects[dupKey] = primary
+			ids[primary] = dupKey
+			pcall(function() primary:SetAttribute("PT_ObjectId", dupKey) end)
+		end
+		pcall(function() dup:Destroy() end)
+	end
+
+	-- 3. Consolidate duplicate subfolders within primary
+	local seenSub = {}
+	for _, sub in ipairs(primary:GetChildren()) do
+		if sub:IsA("Folder") then
+			if seenSub[sub.Name] then
+				local targetSub = seenSub[sub.Name]
+				for _, item in ipairs(sub:GetChildren()) do
+					local existingItem = targetSub:FindFirstChild(item.Name)
+					if existingItem and existingItem ~= item then
+						pcall(function() existingItem:Destroy() end)
+					end
+					item.Parent = targetSub
+				end
+				local subKey = ids[sub]
+				if subKey then
+					local oldKey = ids[targetSub]
+					if oldKey and oldKey ~= subKey then objects[oldKey] = nil; dirtyDeleted[oldKey] = nil end
+					objects[subKey] = targetSub
+					ids[targetSub] = subKey
+					pcall(function() targetSub:SetAttribute("PT_ObjectId", subKey) end)
+				end
+				pcall(function() sub:Destroy() end)
+			else
+				seenSub[sub.Name] = sub
+			end
+		end
+	end
+end
 
 local function index()
+	consolidateEclipseSaves()
+	ensureAccessoryWelds()
 	currentRevision = 0
 	objects = {}; ids = {}; baseline = {}; versions = {}; pending = {}; meshRetry = {}; referenceRetry = {}; appearanceRetry = {}; warnings = {}
+	table.clear(dirtyObjects)
+	table.clear(dirtyDeleted)
+	cachedSnapshot = {}
+	initialScanDone = false
 	terrainReset()
 	local function walk(parent, parentId)
 		local counts = {}
@@ -807,6 +1327,19 @@ local function capture(obj, key)
 		if ok then p.Source = text:gsub(string.char(13, 10), string.char(10)):gsub(string.char(13), string.char(10)); warnings[key..":Source"] = nil else warn(key..":Source", obj.Name..": cannot access script source") end
 	end
 	if obj:IsA("MeshPart") then for _, name in ipairs({"MeshId", "MeshContent", "CollisionFidelity", "RenderFidelity", "FluidFidelity"}) do local ok, v = pcall(function() return encode(obj[name]) end); if ok and v then p[name] = v end end end
+	if obj:IsA("BasePart") and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
+		local m = obj:FindFirstAncestorWhichIsA("Model")
+		if m and isRigBeingAnimated(m) then
+			if baseline[key] and baseline[key].props and baseline[key].props.CFrame then
+				p.CFrame = baseline[key].props.CFrame
+			elseif cachedSnapshot[key] and cachedSnapshot[key].props and cachedSnapshot[key].props.CFrame then
+				p.CFrame = cachedSnapshot[key].props.CFrame
+			else
+				local rest = getRigLimbRestCFrame(obj)
+				if rest then p.CFrame = encode(rest) end
+			end
+		end
+	end
 	local attrs = {}; for name, value in pairs(obj:GetAttributes()) do if name ~= "PT_ObjectId" then local v = encode(value); if v ~= nil then attrs[name] = v end end end
 	local tags = Collection:GetTags(obj); table.sort(tags)
 	local tbAssetId = 0
@@ -820,19 +1353,158 @@ local function capture(obj, key)
 	return {class = obj.ClassName, name = obj.Name, parent = ids[obj.Parent] or "@game", props = p, attributes = attrs, tags = tags, modelScale = obj:IsA("Model") and obj:GetScale() or nil, isToolbox = (tbAssetId > 0), assetId = tbAssetId}
 end
 
-local function snapshot()
-	for _, name in ipairs(roots) do discover(game:GetService(name)) end
-	local out = {}
-	for key, obj in pairs(objects) do if obj.Parent and (serviceIds[key] or ids[obj.Parent]) then
-			local ok, value = pcall(capture, obj, key)
-			if ok then out[key] = value else warn(key..":capture", obj.Name..": error reading object"); out[key] = baseline[key] end
-		end end
-	for key, value in pairs(terrainRecords()) do out[key] = value end
-	return out
+-- ============================================================
+-- EVENT-DRIVEN HOOKS (TRIGGERS DIRTY QUEUES AUTOMATICALLY)
+-- ============================================================
+local function hookHierarchy(service)
+	pcall(function()
+		service.DescendantAdded:Connect(function(obj)
+			if eligible(obj) then
+				dirtyObjects[obj] = true
+				hasLocalEdits = true; lastActionTime = os.clock()
+				if not ids[obj] then
+					local key = Http:GenerateGUID(false)
+					ids[obj] = key; objects[key] = obj; obj:SetAttribute("PT_ObjectId", key)
+				end
+			end
+		end)
+		service.DescendantRemoving:Connect(function(obj)
+			local key = ids[obj]
+			if key then
+				dirtyDeleted[key] = true
+				dirtyObjects[obj] = nil
+				hasLocalEdits = true; lastActionTime = os.clock()
+			end
+		end)
+	end)
+end
+
+for _, name in ipairs(roots) do
+	pcall(function() hookHierarchy(game:GetService(name)) end)
+end
+
+-- Selection-driven property listener: listens to Changed on objects developer interacts with
+local selectionConnections = {}
+pcall(function()
+	Selection.SelectionChanged:Connect(function()
+		for _, c in ipairs(selectionConnections) do pcall(function() c:Disconnect() end) end
+		table.clear(selectionConnections)
+		local toWatch = {}
+		for _, item in ipairs(Selection:Get()) do
+			table.insert(toWatch, item)
+			if item:IsA("Model") then
+				for _, d in ipairs(item:GetDescendants()) do
+					if d:IsA("BasePart") then table.insert(toWatch, d) end
+				end
+			end
+		end
+		for _, obj in ipairs(toWatch) do
+			if eligible(obj) then
+				local curM = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+				if not (curM and isRigBeingAnimated(curM)) then
+					dirtyObjects[obj] = true
+					hasLocalEdits = true; lastActionTime = os.clock()
+				end
+				local ok, conn = pcall(function()
+					return obj.Changed:Connect(function(prop)
+						local m = obj:IsA("Model") and obj or obj:FindFirstAncestorWhichIsA("Model")
+						if m and isRigBeingAnimated(m) then
+							return
+						end
+						dirtyObjects[obj] = true
+						hasLocalEdits = true; lastActionTime = os.clock()
+					end)
+				end)
+				if ok and conn then table.insert(selectionConnections, conn) end
+			end
+		end
+	end)
+end)
+
+-- ChangeHistoryService listener (tracks Studio Undo/Redo/Property actions)
+pcall(function()
+	ChangeHistoryService.OnUndo:Connect(function()
+		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end; lastActionTime = os.clock()
+	end)
+	ChangeHistoryService.OnRedo:Connect(function()
+		for _, obj in pairs(objects) do if eligible(obj) then dirtyObjects[obj] = true end end; lastActionTime = os.clock()
+	end)
+end)
+
+-- INCREMENTAL FAST SNAPSHOT (0ms when nothing changed)
+local function snapshot(forceFull)
+	if forceFull or not initialScanDone or next(cachedSnapshot) == nil then
+		for _, name in ipairs(roots) do discover(game:GetService(name)) end
+		cachedSnapshot = {}
+		for key, obj in pairs(objects) do
+			if obj.Parent and (serviceIds[key] or ids[obj.Parent]) then
+				local ok, value = pcall(capture, obj, key)
+				if ok then
+					cachedSnapshot[key] = value
+				else
+					warn(key..":capture_err", obj.Name .. " (" .. obj.ClassName .. "): capture failed: " .. tostring(value))
+					cachedSnapshot[key] = baseline[key]
+				end
+			end
+		end
+		for key, value in pairs(terrainRecords()) do cachedSnapshot[key] = value end
+		table.clear(dirtyObjects)
+		table.clear(dirtyDeleted)
+		initialScanDone = true
+		return cachedSnapshot
+	end
+
+	if next(dirtyDeleted) or next(dirtyObjects) or next(dirtyTerrainChunks) then
+		hasLocalEdits = true
+	end
+
+	-- Incremental: apply deletions
+	if next(dirtyDeleted) then
+		for key in pairs(dirtyDeleted) do
+			cachedSnapshot[key] = nil
+		end
+		table.clear(dirtyDeleted)
+	end
+
+	-- Incremental: capture dirty objects
+	if next(dirtyObjects) then
+		for obj in pairs(dirtyObjects) do
+			if obj and obj.Parent and eligible(obj) then
+				if not ids[obj] then
+					local key = Http:GenerateGUID(false)
+					ids[obj] = key; objects[key] = obj; obj:SetAttribute("PT_ObjectId", key)
+				end
+				local key = ids[obj]
+				if key then
+					local ok, value = pcall(capture, obj, key)
+					if ok then cachedSnapshot[key] = value end
+				end
+			end
+		end
+		table.clear(dirtyObjects)
+	end
+
+	-- Incremental: terrain updates
+	if next(dirtyTerrainChunks) then
+		for key, value in pairs(terrainRecords()) do
+			cachedSnapshot[key] = value
+		end
+	end
+
+	return cachedSnapshot
+end
+
+base = function()
+	local a = (address and address.Text or ""):gsub("%s+", ""):gsub("/+$", "")
+	if a == "" or a == "http://" or a == "https://" then
+		a = plugin:GetSetting("PTAddress") or "http://127.0.0.1:8787"
+		a = tostring(a):gsub("%s+", ""):gsub("/+$", "")
+	end
+	return a
 end
 
 local function request(method, payload, renewed)
-	local t0 = os.clock()
+	if not alive then return {} end
 	local reqUrl = endpoint
 
 	if method == "GET" then
@@ -842,7 +1514,8 @@ local function request(method, payload, renewed)
 		end
 	end
 
-	local response = Http:RequestAsync({Url = reqUrl, Method = method, Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json", ["bypass-tunnel-reminder"] = "true"}, Body = payload and Http:JSONEncode(payload) or nil})
+	local authHeader = "Bearer " .. (credential or token.Text or "")
+	local response = Http:RequestAsync({Url = reqUrl, Method = method, Headers = {Authorization = authHeader, ["Content-Type"] = "application/json", ["bypass-tunnel-reminder"] = "true"}, Body = payload and Http:JSONEncode(payload) or nil})
 
 	if response.StatusCode == 401 and guestEnter and not renewed then guestEnter(); return request(method, payload, true) end
 	local decoded, value = pcall(function() return Http:JSONDecode(response.Body) end)
@@ -850,6 +1523,22 @@ local function request(method, payload, renewed)
 	if response.StatusCode == 409 and method == "POST" then value.conflict = true; return value end
 	if not response.Success then error(value.error or ("HTTP "..response.StatusCode)) end
 	return value
+end
+
+api = function(path, method, payload, renewed)
+	if not alive then return {} end
+	local reqUrl = base().."/api"..path
+	if (method or "GET") == "GET" then
+		reqUrl = reqUrl .. (reqUrl:find("?") and "&" or "?") .. "_t=" .. tostring(os.clock())
+	end
+
+	local authHeader = "Bearer " .. (credential or token.Text or "")
+	local response = Http:RequestAsync({Url = reqUrl, Method = method or "GET", Headers = {Authorization = authHeader, ["Content-Type"] = "application/json", ["bypass-tunnel-reminder"] = "true"}, Body = payload and Http:JSONEncode(payload) or nil})
+	if response.StatusCode == 401 and path ~= "/guest" and path ~= "/rooms/auth" and not path:find("/delete") and not renewed then guestEnter(); return api(path, method, payload, true) end
+	local decoded, data = pcall(function() return Http:JSONDecode(response.Body) end)
+	if not decoded then error("Server unavailable (HTTP "..response.StatusCode.."). Check server address and verify server is running.") end
+	if not response.Success then error(data.error or ("HTTP "..response.StatusCode)) end
+	return data
 end
 
 local function meshSource(value)
@@ -869,21 +1558,37 @@ local function loadMesh(obj, key, value)
 	local success, err = pcall(function()
 		local options = {}; for _, name in ipairs({"CollisionFidelity", "RenderFidelity", "FluidFidelity"}) do if p[name] then options[name] = decode(p[name]) end end
 		local fresh = Assets:CreateMeshPartAsync(source, options); if not fresh then error("Roblox did not return mesh geometry") end
-		obj:ApplyMesh(fresh); fresh:Destroy()
+		local targetCf = (p and p.CFrame and decode(p.CFrame)) or obj.CFrame
+		obj:ApplyMesh(fresh)
+		pcall(function() obj.CFrame = targetCf end)
+		fresh:Destroy()
 	end)
 	if success then meshRetry[key] = nil; warnings[key..":mesh"] = nil
 	else meshRetry[key] = os.clock() + 15; warn(key..":mesh", value.name..": Roblox refused to load mesh; other parts continue syncing") end
 end
 
 local function apply(remote, sent, force)
-	local before = snapshot(); local changed = {}
+	local before = cachedSnapshot
+	local changed = {}
+	local partsToUnanchor = {}
+	local constraintsToEnable = {}
 	for key, record in pairs(remote) do
 		if force or versions[key] ~= record.version or pending[key] or meshRetry[key] or referenceRetry[key] or (appearanceRetry[key] and appearanceRetry[key] <= os.clock()) then
 			changed[key] = {version = record.version, value = force and copy(record.value) or merge(baseline[key], before[key], record.value)}
 		end
 	end
+
+	local totalChanged = 0
+	for _ in pairs(changed) do totalChanged += 1 end
+
+	local createdCount = 0
 	for key, r in pairs(changed) do
-		if r.value and r.value.class ~= "PTTerrainChunk" and not objects[key] then
+		if r.value and r.value.class ~= "PTTerrainChunk" and not objects[key] and not (r.value.class == "Weld" and (r.value.name == "AccessoryWeld" or key:find("AccessoryWeld"))) then
+			createdCount += 1
+			if totalChanged > 50 and (createdCount % 120 == 0 or createdCount == totalChanged) then
+				status("Creating: " .. formatCount(createdCount) .. "/" .. formatCount(totalChanged) .. "...")
+				task.wait()
+			end
 			if r.value.isToolbox and r.value.assetId and r.value.assetId > 0 then
 				pending[key] = true
 				task.spawn(function()
@@ -892,7 +1597,7 @@ local function apply(remote, sent, force)
 						local model = asset:GetChildren()[1] or asset
 						model.Name = r.value.name; model:SetAttribute("PT_ObjectId", key); objects[key] = model; ids[model] = key
 						local targetPivot = r.value.props and (r.value.props.WorldPivot or r.value.props.CFrame)
-						if targetPivot then pcall(function() model:PivotTo(decode(targetPivot)) end) end
+						if targetPivot then pcall(function() model.WorldPivot = decode(targetPivot) end) end
 						if r.value.modelScale then pcall(function() model:ScaleTo(r.value.modelScale) end) end
 						model.Parent = objects[r.value.parent] or workspace; asset:Destroy()
 						pending[key] = nil
@@ -907,8 +1612,21 @@ local function apply(remote, sent, force)
 				end)
 			else
 				local ok, obj = pcall(Instance.new, r.value.class)
+				if not ok and r.value.class == "MeshPart" then
+					local src = meshSource(r.value)
+					if src then
+						ok, obj = pcall(function() return Assets:CreateMeshPartAsync(src) end)
+					end
+				end
 				if ok then
-					if obj:IsA("BasePart") then for _, s in ipairs({"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"}) do obj[s] = Enum.SurfaceType.Smooth end end
+					if obj:IsA("BasePart") then
+						for _, s in ipairs({"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"}) do obj[s] = Enum.SurfaceType.Smooth end
+						obj.Anchored = true
+						if r.value.props then
+							if r.value.props.Size then pcall(function() obj.Size = decode(r.value.props.Size) end) end
+							if r.value.props.CFrame then pcall(function() obj.CFrame = decode(r.value.props.CFrame) end) end
+						end
+					end
 					obj:SetAttribute("PT_ObjectId", key); objects[key] = obj; ids[obj] = key; pending[key] = nil; warnings[key..":create"] = nil
 				else pending[key] = true; warn(key..":create", r.value.name..": class cannot be created via API") end
 			end
@@ -916,7 +1634,37 @@ local function apply(remote, sent, force)
 	end
 	for key, r in pairs(changed) do local v = r.value; local obj = objects[key]
 		if v and obj then
-			local ok = pcall(function() if obj.Name ~= v.name then obj.Name = v.name end; if not serviceIds[key] then local parent = objects[v.parent]; if not parent then error("Parent unavailable") end; if obj.Parent ~= parent then obj.Parent = parent end end end)
+			local ok = pcall(function()
+				if obj.Name ~= v.name then obj.Name = v.name end
+				if not serviceIds[key] then
+					local parent = objects[v.parent]
+					if not parent then error("Parent unavailable") end
+					if obj.Parent ~= parent then
+						if obj:IsA("Folder") and (parent == game:GetService("ServerStorage") or parent:IsDescendantOf(game:GetService("ServerStorage"))) then
+							local existing = parent:FindFirstChild(v.name)
+							if existing and existing:IsA("Folder") and existing ~= obj then
+								local existingKey = ids[existing]
+								if not existingKey or not remote[existingKey] then
+									for _, ch in ipairs(obj:GetChildren()) do
+										ch.Parent = existing
+									end
+									if existingKey then
+										objects[existingKey] = nil
+										dirtyDeleted[existingKey] = nil
+									end
+									ids[obj] = nil
+									objects[key] = existing
+									ids[existing] = key
+									pcall(function() existing:SetAttribute("PT_ObjectId", key) end)
+									obj:Destroy()
+									obj = existing
+								end
+							end
+						end
+						if obj.Parent ~= parent then obj.Parent = parent end
+					end
+				end
+			end)
 			if ok then pending[key] = nil; warnings[key..":parent"] = nil else pending[key] = true; warn(key..":parent", v.name..": waiting for parent object") end
 		end
 	end
@@ -932,7 +1680,13 @@ local function apply(remote, sent, force)
 			if safe then local ok = pcall(function() item.obj:ScaleTo(value) end); if ok then warnings[item.key..":scale"] = nil else warn(item.key..":scale", item.obj.Name..": model scale unavailable") end end
 		end
 	end
+	local appliedCount = 0
 	for key, r in pairs(changed) do local v = r.value; local obj = objects[key]
+		appliedCount += 1
+		if force and totalChanged > 50 and (appliedCount % 60 == 0 or appliedCount == totalChanged) then
+			status("Loading place: " .. formatCount(appliedCount) .. "/" .. formatCount(totalChanged) .. " (" .. math.floor(appliedCount / totalChanged * 100) .. "%)")
+			task.wait()
+		end
 		if not v then appearanceRetry[key] = nil end
 		if v and obj and not pending[key] then
 			referenceRetry[key] = nil
@@ -954,8 +1708,31 @@ local function apply(remote, sent, force)
 				local ok = pcall(function()
 					if type(value) == "table" and value.t == "Instance" and not objects[value.v] then referenceRetry[key] = true; error("Linked instance still loading") end
 					if name == "Source" and obj:IsA("LuaSourceContainer") then if Editor:GetEditorSource(obj) ~= value then Editor:UpdateSourceAsync(obj, function() return value end) end
-					elseif obj:IsA("Model") and (name == "CFrame" or name == "WorldPivot") then local cf = decode(value); if typeof(cf) == "CFrame" then obj:PivotTo(cf) end
-					elseif not equal(encode(obj[name]), value) then obj[name] = decode(value) end
+					elseif obj:IsA("Model") and (name == "CFrame" or name == "WorldPivot") then local cf = decode(value); if typeof(cf) == "CFrame" then pcall(function() obj.WorldPivot = cf end) end
+					elseif name == "Anchored" and obj:IsA("BasePart") then
+						if isCharacterPart(obj) then
+							obj.Anchored = true
+						elseif decode(value) == false then
+							partsToUnanchor[obj] = true
+						else
+							obj.Anchored = true
+						end
+					elseif name == "Enabled" and (obj:IsA("Constraint") or obj:IsA("BallSocketConstraint") or obj:IsA("AnimationConstraint")) and decode(value) == true then
+						constraintsToEnable[obj] = true
+						obj.Enabled = false
+					elseif name == "CFrame" and obj:IsA("BasePart") then
+						local m = obj:FindFirstAncestorWhichIsA("Model")
+						if not force and m and isRigBeingAnimated(m) and (isRigLimb(obj) or obj:FindFirstAncestorWhichIsA("Accessory")) then
+							-- Only suppress CFrame updates during active animation preview to prevent joint conflicts
+						else
+							local targetCf = decode(value)
+							if not equal(encode(obj[name]), encode(targetCf)) then
+								obj[name] = targetCf
+							end
+						end
+					elseif not equal(encode(obj[name]), value) then
+						obj[name] = decode(value)
+					end
 				end)
 				if ok then warnings[key..":"..name] = nil else warn(key..":"..name, v.name.."."..name..": unavailable via API"); if appearanceSet[name] then appearanceRetry[key] = os.clock() + 10 end end
 			end
@@ -967,11 +1744,29 @@ local function apply(remote, sent, force)
 		elseif not v and obj and not serviceIds[key] then local ok = pcall(function() obj:Destroy() end); if ok then ids[obj] = nil; objects[key] = nil; pending[key] = nil; meshRetry[key] = nil; referenceRetry[key] = nil else warn(key..":delete", obj.Name..": Roblox prevented deletion") end end
 	end
 	for key, r in pairs(changed) do if key:sub(1, 9) == "~Terrain/" then applyTerrain(key, r.value) end end
-	local after = snapshot()
+
+	-- Safely activate constraints now that attachments and parts are at their true positions
+	for c in pairs(constraintsToEnable) do
+		pcall(function() c.Enabled = true end)
+	end
+	-- Safely unanchor physics parts now that constraints and NoCollision are established
+	for p in pairs(partsToUnanchor) do
+		if not isCharacterPart(p) then
+			pcall(function() p.Anchored = false end)
+		else
+			pcall(function() p.Anchored = true end)
+		end
+	end
+
 	for key, r in pairs(remote) do
 		versions[key] = r.version
-		if changed[key] then baseline[key] = acknowledged(r.value, changed[key].value, after[key]) end
+		if changed[key] then
+			baseline[key] = copy(r.value)
+			cachedSnapshot[key] = copy(r.value)
+		end
 	end
+	consolidateEclipseSaves()
+	ensureAccessoryWelds()
 end
 
 local function blocked(obj, key)
@@ -989,33 +1784,64 @@ local function changes(current)
 	return list
 end
 
--- ИСПРАВЛЕНИЕ ЗДЕСЬ: Плагин больше не отправляет одни и те же данные бесконечно!
-local function sendChanges(current)
-	local list = changes(current)
-	if #list > 0 then
-		local result = request("POST", {changes = list, since = currentRevision})
-		if not result.conflict then
-			warnings.syncConflict = nil
-			currentRevision = result.revision
-
-			-- ГЛАВНЫЙ ФИКС: Записываем отправленные данные в baseline, чтобы не спамить ими сервер 4 раза в сек.
-			for _, ch in ipairs(list) do
-				if ch.deleted then
-					baseline[ch.id] = nil
-					versions[ch.id] = nil
-				else
-					baseline[ch.id] = copy(ch.value)
-					versions[ch.id] = currentRevision
-				end
-			end
-
-			if result.remoteChanges and next(result.remoteChanges) then
-				apply(result.remoteChanges, current, false)
-			end
-			return {revision = currentRevision, objects = {}}
+-- ZERO-LAG SENDCHANGES: only compares and sends when objects were actually edited
+local function sendChanges(current, forceFullCompare)
+	local list = {}
+	if forceFullCompare or hasLocalEdits then
+		list = changes(current)
+		if #list == 0 then
+			hasLocalEdits = false
 		end
 	end
 
+	if #list > 0 then
+		local batches = {}
+		local curBatch = {}
+		local curBytes = 0
+		for _, item in ipairs(list) do
+			local itemJson = Http:JSONEncode(item)
+			local itemLen = #itemJson
+			if (#curBatch >= 400 or curBytes + itemLen > 650000) and #curBatch > 0 then
+				table.insert(batches, curBatch)
+				curBatch = {}
+				curBytes = 0
+			end
+			table.insert(curBatch, item)
+			curBytes += itemLen
+		end
+		if #curBatch > 0 then
+			table.insert(batches, curBatch)
+		end
+
+		hasLocalEdits = false
+		local sentCount = 0
+		for _, batch in ipairs(batches) do
+			sentCount += #batch
+			if #list > 50 then
+				status("Saving to server: " .. formatCount(sentCount) .. "/" .. formatCount(#list) .. " (" .. math.floor(sentCount / #list * 100) .. "%)")
+			end
+			local result = request("POST", {changes = batch, since = currentRevision})
+			if not result.conflict then
+				warnings.syncConflict = nil
+				currentRevision = result.revision
+				for _, ch in ipairs(batch) do
+					if ch.deleted then
+						baseline[ch.id] = nil
+						versions[ch.id] = nil
+					else
+						baseline[ch.id] = copy(ch.value)
+						versions[ch.id] = currentRevision
+					end
+				end
+				if not forceFullCompare and result.remoteChanges and next(result.remoteChanges) then
+					apply(result.remoteChanges, current, false)
+				end
+			end
+		end
+		return {revision = currentRevision, objects = {}}
+	end
+
+	-- When no local changes exist, simply ask server for deltas since currentRevision
 	local latest = request("GET")
 	if latest.unchanged then
 		return {revision = currentRevision, objects = {}}
@@ -1032,46 +1858,411 @@ local function sendChanges(current)
 	return latest
 end
 
-local function connectSession()
+local function focusImportedPlace()
+	local low = Vector3.new(math.huge, math.huge, math.huge)
+	local high = Vector3.new(-math.huge, -math.huge, -math.huge)
+	local count = 0
+	for key, obj in pairs(objects) do
+		-- CRUCIAL FIX: Exclude Baseplate! Default Baseplate is 2048x2048 studs and throws camera 3,000 studs into the sky!
+		if obj:IsA("BasePart") and obj.Name ~= "Baseplate" and obj:IsDescendantOf(workspace) then
+			local a = obj.Position - obj.Size / 2; local b = obj.Position + obj.Size / 2
+			low = Vector3.new(math.min(low.X, a.X), math.min(low.Y, a.Y), math.min(low.Z, a.Z))
+			high = Vector3.new(math.max(high.X, b.X), math.max(high.Y, b.Y), math.max(high.Z, b.Z)); count += 1
+		end
+	end
+	if count > 0 and workspace.CurrentCamera then
+		local center = (low + high) / 2
+		local span = high - low
+		local distance = math.clamp(math.max(span.X, math.max(span.Y, span.Z)) * 1.25, 20, 200)
+		workspace.CurrentCamera.CFrame = CFrame.lookAt(center + Vector3.new(distance * .65, distance * .5, distance), center)
+		workspace.CurrentCamera.Focus = CFrame.new(center)
+	elseif workspace.CurrentCamera then
+		-- Default comfortable close-up view of the center
+		workspace.CurrentCamera.CFrame = CFrame.lookAt(Vector3.new(20, 16, 26), Vector3.new(0, 2, 0))
+		workspace.CurrentCamera.Focus = CFrame.new(0, 0, 0)
+	end
+end
+
+local function downloadAllObjects(state)
+	if state.has_more and state.total_objects then
+		local allObjects = copy(state.objects or {})
+		local page = state.page or 1
+		local limit = state.limit or 250
+		while state.has_more do
+			page += 1
+			status("Downloading objects: "..formatCount(math.min(page * limit, state.total_objects)).."/"..formatCount(state.total_objects).."...")
+			local pUrl = endpoint .. (endpoint:find("?") and "&" or "?") .. "page=" .. tostring(page) .. "&limit=" .. tostring(limit) .. "&_t=" .. tostring(os.clock())
+			local resp = Http:RequestAsync({Url = pUrl, Method = "GET", Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json"}})
+			if resp.Success then
+				local pData = Http:JSONDecode(resp.Body)
+				for k, v in pairs(pData.objects or {}) do allObjects[k] = v end
+				state.has_more = pData.has_more
+			else
+				break
+			end
+		end
+		state.objects = allObjects
+	end
+	return state
+end
+
+local function connectSession(isCreating)
 	if busy then return end
 	if active then
 		if Run:IsRunning() then status("Stop Play mode before leaving session."); return end
 		busy = true
 		local ok, err = pcall(function()
-			local current = snapshot()
-			local remote = sendChanges(current)
+			local current = snapshot(true)
+			local remote = sendChanges(current, true)
 			if warnings.syncConflict then error("Unsent edits remain. Retry leaving in a few seconds.") end
 		end)
 		busy = false
 		if not ok then status("Cannot leave: unsent changes. "..tostring(err)); return end
 		restoreSuppressed = true; active = false; connect.Text = "Reconnect to Session"; status("Changes synced to session. Safe to close local copy.")
+		pcall(function()
+			if room.Text ~= "" then
+				api("/rooms/"..room.Text.."/presence", "POST", {leave = true})
+			end
+		end)
 		return
 	end
 	if Run:IsRunning() then status("Stop Play/Test mode before connecting."); return end
 	busy = true
 	local ok, err = pcall(function()
-		if setup.Text:match("^%s*{") then local c = Http:JSONDecode(setup.Text); address.Text = c.server; room.Text = c.room; token.Text = c.token; setup.Text = "" end
-		local base = address.Text:gsub("%s+", ""):gsub("/+$", "")
-		if not base:match("^https?://") then error("Enter server address with http:// or https://") end
-		endpoint = base.."/api/rooms/"..room.Text.."/sync"; credential = token.Text
-		plugin:SetSetting("PTAddress", base); plugin:SetSetting("PTRoom", room.Text)
+		local baseServer = base()
+		if not baseServer:match("^https?://") then error("Enter server address with http:// or https://") end
+		endpoint = baseServer.."/api/rooms/"..room.Text.."/sync"
+		credential = token.Text
+		plugin:SetSetting("PTAddress", baseServer)
+		plugin:SetSetting("PTRoom", room.Text)
+		plugin:SetSetting("PTRoomToken:"..room.Text, credential)
 
 		index()
-		local current = snapshot(); local state = request("GET")
-		if state.unchanged or next(state.objects or {}) == nil then
-			if not state.owner then error("Host has not published the place yet") end
-			state = sendChanges(current)
-		end
+		local current = snapshot(true)
+		local state = request("GET")
 
-		if state.objects and next(state.objects) ~= nil then
+		-- Support paginated download for massive places
+		state = downloadAllObjects(state)
+
+		-- If creating project or room on server is empty, upload local place
+		if isCreating or state.unchanged or next(state.objects or {}) == nil then
+			status("Dedicated room is empty. Uploading current place as initial state...")
+			state = sendChanges(current, true)
+		elseif state.objects and next(state.objects) ~= nil then
 			apply(state.objects, current, true)
 		end
+		consolidateEclipseSaves()
+		ensureAccessoryWelds()
 		currentRevision = state.revision or currentRevision
 
-		local after = snapshot(); for key, value in pairs(after) do if not versions[key] then baseline[key] = value end end
-		active = true; accept.Visible = false; connect.Text = "Leave Session"; status("Place connected. Real-time sync enabled."..warningText())
+		local after = snapshot(true); for key, value in pairs(after) do if not versions[key] then baseline[key] = value end end
+		active = true; accept.Visible = false; connect.Text = "Leave Session"; status("Connected to dedicated project: "..room.Text.." · Real-time sync enabled."..warningText())
+		-- Camera untouched on connect
 	end)
 	busy = false; if not ok then active = false; status(tostring(err)); accept.Visible = endpoint ~= nil end
+end
+
+-- Refresh Server Projects List
+local function refreshProjectsList()
+	for _, child in ipairs(projectsListFrame:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+	status("Querying projects from " .. base() .. "...")
+	local ok, list = pcall(function() return api("/rooms", "GET") end)
+	if not ok or type(list) ~= "table" then
+		local lbl = textLabel("Failed to load projects: " .. tostring(list), 24, projectsListFrame)
+		lbl.TextColor3 = palette.danger
+		status("Cannot reach server. Verify address in Settings.")
+		return
+	end
+	if #list == 0 then
+		local lbl = textLabel("No active projects on this server. Create one above!", 24, projectsListFrame)
+		lbl.TextColor3 = palette.subtle
+		status("No projects found on server.")
+		return
+	end
+	for _, r in ipairs(list) do
+		local row = card(projectsListFrame, "Row_" .. r.id)
+		row.BackgroundColor3 = palette.field
+		local rowHeader = title(r.name .. (r.requires_password and "  🔒 (Password required)" or "  🔓 (Open)"), row)
+		rowHeader.TextSize = 13
+		local rowMeta = textLabel("ID: " .. r.id .. "  |  " .. tostring(r.objects_count) .. " objects  |  " .. tostring(r.active_peers) .. " online", 18, row)
+		rowMeta.TextSize = 11; rowMeta.TextColor3 = palette.subtle
+		local selBtn = makeButton("Select Project: " .. r.id, row)
+		selBtn.MouseButton1Click:Connect(function()
+			projectJoinId.Text = r.id
+			status("Selected room: " .. r.name .. " (" .. r.id .. ")")
+			if r.requires_password then
+				projectJoinPassword:CaptureFocus()
+			end
+		end)
+
+		local delBtn = makeButton("Delete Project", row, "danger")
+		delBtn.TextSize = 11
+		delBtn.Size = UDim2.new(1, 0, 0, 26)
+
+		local confirmBox = container(row, "ConfirmDelete")
+		confirmBox.Visible = false
+		confirmBox.BackgroundColor3 = palette.dangerBg
+		pad(confirmBox, 6, 6)
+		corner(confirmBox, 6)
+		stroke(confirmBox, palette.dangerBorder, 1)
+
+		local confirmPrompt = textLabel(
+			r.requires_password
+				and "Enter password to permanently delete this project:"
+				or "Are you sure you want to permanently delete this project?",
+			20,
+			confirmBox
+		)
+		confirmPrompt.TextColor3 = Color3.fromRGB(252, 165, 165)
+		confirmPrompt.TextSize = 11
+
+		local delPwInput = nil
+		if r.requires_password then
+			delPwInput = field("Enter room password", "", confirmBox)
+			delPwInput.Size = UDim2.new(1, 0, 0, 26)
+		end
+
+		local actionRow = container(confirmBox, "ActionRow")
+		actionRow.Size = UDim2.new(1, 0, 0, 28)
+		local actLayout = Instance.new("UIListLayout")
+		actLayout.FillDirection = Enum.FillDirection.Horizontal
+		actLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+		actLayout.Padding = UDim.new(0, 8)
+		actLayout.Parent = actionRow
+
+		local cancelBtn = makeButton("Cancel", actionRow)
+		cancelBtn.Size = UDim2.new(0, 70, 0, 26)
+		cancelBtn.TextSize = 11
+
+		local execDelBtn = makeButton("Confirm Delete", actionRow, "danger")
+		execDelBtn.Size = UDim2.new(0, 110, 0, 26)
+		execDelBtn.TextSize = 11
+
+		delBtn.MouseButton1Click:Connect(function()
+			confirmBox.Visible = true
+			delBtn.Visible = false
+			if delPwInput then
+				delPwInput:CaptureFocus()
+			end
+		end)
+
+		cancelBtn.MouseButton1Click:Connect(function()
+			confirmBox.Visible = false
+			delBtn.Visible = true
+		end)
+
+		execDelBtn.MouseButton1Click:Connect(function()
+			local pw = delPwInput and delPwInput.Text or ""
+			if r.requires_password and pw == "" then
+				status("Password is required to delete this project.")
+				if delPwInput then delPwInput:CaptureFocus() end
+				return
+			end
+			status("Deleting project '" .. r.name .. "' (" .. r.id .. ")...")
+			local ok, res = pcall(function()
+				return api("/rooms/" .. r.id .. "/delete", "POST", {password = pw})
+			end)
+			if ok then
+				status("Project '" .. r.name .. "' deleted successfully.")
+				if room.Text == r.id and active then
+					active = false
+					endpoint = nil
+					connect.Text = "Reconnect to Session"
+					room.Text = ""
+					token.Text = ""
+					credential = nil
+					plugin:SetSetting("PTRoom", "")
+					refreshUI(active, loggedIn, inbox ~= nil, busy)
+				end
+				refreshProjectsList()
+			else
+				status("Delete failed: " .. tostring(res))
+			end
+		end)
+	end
+	status("Loaded " .. tostring(#list) .. " project(s) from server.")
+end
+btnRefreshProjects.MouseButton1Click:Connect(refreshProjectsList)
+
+-- Connect to Project Button Action
+btnConnectProject.MouseButton1Click:Connect(function()
+	if busy or active then return end
+	local rId = projectJoinId.Text:gsub("%s+", "")
+	if rId == "" then status("Enter Project ID or Name"); return end
+	busy = true
+	status("Connecting to project: " .. rId .. "...")
+	local ok, res = pcall(function()
+		return api("/rooms/auth", "POST", {
+			roomId = rId,
+			password = projectJoinPassword.Text,
+			userName = selfNick.Text ~= "" and selfNick.Text or "User",
+			userId = localUserId
+		})
+	end)
+	busy = false
+	if not ok then
+		status("Join failed: " .. tostring(res))
+		return
+	end
+	room.Text = res.roomId
+	token.Text = res.token
+	credential = res.token
+	sessionTitle.Text = res.name
+	plugin:SetSetting("PTRoom", res.roomId)
+	plugin:SetSetting("PTRoomToken:" .. res.roomId, res.token)
+	uiTab = "session"
+	connectSession(false)
+end)
+
+-- Create New Project Button Action
+btnCreateProject.MouseButton1Click:Connect(function()
+	if busy or active then return end
+	local pName = newProjectName.Text:gsub("^%s+", ""):gsub("%s+$", "")
+	if pName == "" then pName = game.Name ~= "" and game.Name or "Dedicated Project" end
+	busy = true
+	status("Creating new project on server: " .. pName .. "...")
+	local ok, res = pcall(function()
+		return api("/rooms/create", "POST", {
+			name = pName,
+			password = newProjectPassword.Text
+		})
+	end)
+	busy = false
+	if not ok then
+		status("Create failed: " .. tostring(res))
+		return
+	end
+	room.Text = res.id
+	token.Text = res.token
+	credential = res.token
+	sessionTitle.Text = res.name
+	plugin:SetSetting("PTRoom", res.id)
+	plugin:SetSetting("PTRoomToken:" .. res.id, res.token)
+	uiTab = "session"
+	connectSession(true)
+end)
+
+-- Force Push & Pull Buttons Actions
+btnForcePush.MouseButton1Click:Connect(function()
+	if not active or busy then return end
+	busy = true
+	local origText = btnForcePush.Text
+	status("Preparing local place for push...")
+	local ok, err = pcall(function()
+		local current = snapshot(true)
+		local list = {}
+		for k, v in pairs(current) do
+			table.insert(list, {id = k, version = versions[k] or 0, value = v})
+		end
+
+		local batches = {}
+		local curBatch = {}
+		local curBytes = 0
+		for _, item in ipairs(list) do
+			local itemJson = Http:JSONEncode(item)
+			local itemLen = #itemJson
+			if (#curBatch >= 400 or curBytes + itemLen > 650000) and #curBatch > 0 then
+				table.insert(batches, curBatch)
+				curBatch = {}
+				curBytes = 0
+			end
+			table.insert(curBatch, item)
+			curBytes += itemLen
+		end
+		if #curBatch > 0 then
+			table.insert(batches, curBatch)
+		end
+
+		local sentCount = 0
+		local totalCount = #list
+		for bIdx, batch in ipairs(batches) do
+			sentCount += #batch
+			local pct = math.floor(sentCount / totalCount * 100)
+			status("Pushing to server: " .. formatCount(sentCount) .. "/" .. formatCount(totalCount) .. " (" .. pct .. "%) [Batch " .. bIdx .. "/" .. #batches .. "]")
+			btnForcePush.Text = "Pushing: " .. pct .. "%"
+			task.wait()
+			local res = request("POST", {changes = batch, since = currentRevision})
+			if res and res.revision then
+				currentRevision = res.revision
+				for _, item in ipairs(batch) do
+					baseline[item.id] = copy(item.value)
+					versions[item.id] = currentRevision
+				end
+			end
+		end
+		hasLocalEdits = false
+		status("Successfully pushed place to server! (" .. formatCount(totalCount) .. " objects, Rev " .. tostring(currentRevision) .. ")")
+	end)
+	btnForcePush.Text = origText
+	busy = false
+	if not ok then status("Push failed: " .. tostring(err)) end
+end)
+
+btnFocusBuild.MouseButton1Click:Connect(function()
+	focusImportedPlace()
+	status("Camera centered on build.")
+end)
+
+btnForcePull.MouseButton1Click:Connect(function()
+	if not active or busy then return end
+	busy = true
+	status("Pulling fresh copy from dedicated server...")
+	local ok, err = pcall(function()
+		local current = snapshot(true)
+		local pUrl = endpoint .. (endpoint:find("?") and "&" or "?") .. "page=1&limit=250&_t=" .. tostring(os.clock())
+		local resp = Http:RequestAsync({Url = pUrl, Method = "GET", Headers = {Authorization = "Bearer "..credential, ["Content-Type"] = "application/json"}})
+		if not resp.Success then error("HTTP " .. tostring(resp.StatusCode)) end
+		local state = Http:JSONDecode(resp.Body)
+		state = downloadAllObjects(state)
+		apply(state.objects, current, true)
+		currentRevision = state.revision or currentRevision
+		for k, v in pairs(state.objects or {}) do
+			baseline[k] = copy(v.value)
+			versions[k] = v.version
+		end
+		hasLocalEdits = false
+		consolidateEclipseSaves()
+		ensureAccessoryWelds()
+		status("Place updated from server. (Rev " .. tostring(currentRevision) .. ")")
+	end)
+	busy = false
+	if not ok then status("Pull failed: " .. tostring(err)) end
+end)
+
+guestEnter = function(rename)
+	if not base():match("^https?://") then status("Enter server address in Settings tab"); return end
+	local key = plugin:GetSetting("PTGuestDeviceKey") or plugin:GetSetting("PTGuestDeviceKey:"..base())
+	if type(key) ~= "string" or #key ~= 64 then key = (Http:GenerateGUID(false)..Http:GenerateGUID(false)):gsub("-", ""):lower(); plugin:SetSetting("PTGuestDeviceKey:"..base(), key) end
+	if selfNick.Text == "" then
+		pcall(function() local uid = game:GetService("StudioService"):GetUserId(); if type(uid) == "number" and uid > 0 then selfNick.Text = game:GetService("Players"):GetNameFromUserIdAsync(uid) end end)
+		if selfNick.Text == "" then selfNick.Text = "User_"..key:sub(1, 6) end
+	end
+	plugin:SetSetting("PTGuestDeviceKey", key)
+	local uidToSend = 0
+	if type(localUserId) == "number" and localUserId > 0 then
+		uidToSend = localUserId
+	elseif selfNick.Text ~= "" and selfNick.Text ~= "Username" then
+		pcall(function()
+			local uid = game:GetService("Players"):GetUserIdFromNameAsync(selfNick.Text)
+			if type(uid) == "number" and uid > 0 then uidToSend = uid; localUserId = uid end
+		end)
+	end
+	local value = api("/guest", "POST", {name = selfNick.Text, deviceKey = key, rename = rename == true, userId = uidToSend})
+	if type(value) == "table" and value.token then
+		token.Text = value.token or ""
+		credential = value.token or ""
+		selfNick.Text = value.name or selfNick.Text
+		loggedIn = true
+		plugin:SetSetting("PTInviteToken:"..base(), token.Text); plugin:SetSetting("PTInviteName", selfNick.Text); plugin:SetSetting("PTAddress", base())
+		status("Connected as "..selfNick.Text..". Ready to collaborate.")
+	else
+		error("Server connection failed: invalid response")
+	end
+	return value
 end
 
 local inbox = nil
@@ -1079,70 +2270,12 @@ local lastSent = nil
 local inviting = false
 local polling = false
 
-local function base() return address.Text:gsub("%s+", ""):gsub("/+$", "") end
-
-local function api(path, method, payload, renewed)
-	local t0 = os.clock()
-	local reqUrl = base().."/api"..path
-	if (method or "GET") == "GET" then
-		reqUrl = reqUrl .. (reqUrl:find("?") and "&" or "?") .. "_t=" .. tostring(os.clock())
-	end
-
-	local response = Http:RequestAsync({Url = reqUrl, Method = method or "GET", Headers = {Authorization = "Bearer "..token.Text, ["Content-Type"] = "application/json", ["bypass-tunnel-reminder"] = "true"}, Body = payload and Http:JSONEncode(payload) or nil})
-	if response.StatusCode == 401 and path ~= "/guest" and not renewed then guestEnter(); return api(path, method, payload, true) end
-	local decoded, data = pcall(function() return Http:JSONDecode(response.Body) end)
-	if not decoded then error("Server unavailable (HTTP "..response.StatusCode.."). Check server address and verify server is running.") end
-	if not response.Success then error(data.error or ("HTTP "..response.StatusCode)) end
-	return data
-end
-
-guestEnter = function(rename)
-	if not base():match("^https?://") then status("Enter server address in Settings tab"); return end
-	local key = plugin:GetSetting("PTGuestDeviceKey") or plugin:GetSetting("PTGuestDeviceKey:"..base())
-	if type(key) ~= "string" or #key ~= 64 then key = (Http:GenerateGUID(false)..Http:GenerateGUID(false)):gsub("-", ""):lower(); plugin:SetSetting("PTGuestDeviceKey:"..base(), key) end
-	if selfNick.Text == "" then
-		pcall(function() local uid = game:GetService("StudioService"):GetUserId(); if uid > 0 then selfNick.Text = game:GetService("Players"):GetNameFromUserIdAsync(uid) end end)
-		if selfNick.Text == "" then selfNick.Text = "User_"..key:sub(1, 6) end
-	end
-	plugin:SetSetting("PTGuestDeviceKey", key)
-	local value = api("/guest", "POST", {name = selfNick.Text, deviceKey = key, rename = rename == true})
-	token.Text = value.token; credential = value.token; selfNick.Text = value.name; loggedIn = true
-	plugin:SetSetting("PTInviteToken:"..base(), value.token); plugin:SetSetting("PTInviteName", value.name); plugin:SetSetting("PTAddress", base())
-	status("Your username: "..value.name..". Ready to invite friends.")
-	return value
-end
-
-local function openHost()
-	if not loggedIn then guestEnter() end
-	if active then return end
-	local storage = game:GetService("ReplicatedStorage")
-	local saved = storage:GetAttribute("PT_SavedRoom")
-	if type(saved) == "string" and saved:match("^[a-f0-9]+$") and storage:GetAttribute("PT_SavedServer") == base() then
-		local accessible, info = pcall(function() return api("/rooms/"..saved.."/state") end)
-		if accessible and not info.closed then
-			room.Text = saved; sessionTitle.Text = info.name; connectSession()
-			if not active then error(notice.Text) end
-			return
-		end
-		storage:SetAttribute("PT_SavedRoom", nil); storage:SetAttribute("PT_SavedServer", nil)
-		restoreSuppressed = true; room.Text = ""
-	end
-	local value = api("/rooms", "POST", {name = game.Name})
-	room.Text = value.id
-	sessionTitle.Text = game.Name
-	connectSession()
-	if not active then error(notice.Text) end
-	storage:SetAttribute("PT_SavedRoom", value.id)
-	storage:SetAttribute("PT_SavedServer", base())
-	connect.Visible = true
-end
-
 local function inviteUser()
 	if inviting then return end
 	inviting = true
 	local ok, err = pcall(function()
 		if #nick.Text:gsub("%s+", "") < 3 then error("Enter friend's plugin username") end
-		openHost()
+		if not active then error("Connect to a project first before inviting peers") end
 		local sent = api("/invitations", "POST", {room = room.Text, nick = nick.Text}); lastSent = sent.id
 		inviteStatus.Text = sent.recipientOnline and ("Waiting for acceptance: "..nick.Text) or ("Request saved. Waiting for '"..nick.Text.."' to open the plugin.")
 		status(inviteStatus.Text)
@@ -1161,24 +2294,6 @@ local function emptyPlace()
 	return true
 end
 
-local function focusImportedPlace()
-	local low = Vector3.new(math.huge, math.huge, math.huge)
-	local high = Vector3.new(-math.huge, -math.huge, -math.huge)
-	local count = 0
-	for key, obj in pairs(objects) do
-		if obj:IsA("BasePart") and obj:IsDescendantOf(workspace) then
-			local a = obj.Position - obj.Size / 2; local b = obj.Position + obj.Size / 2
-			low = Vector3.new(math.min(low.X, a.X), math.min(low.Y, a.Y), math.min(low.Z, a.Z))
-			high = Vector3.new(math.max(high.X, b.X), math.max(high.Y, b.Y), math.max(high.Z, b.Z)); count += 1
-		end
-	end
-	if count > 0 and workspace.CurrentCamera then
-		local center = (low + high) / 2; local span = high - low; local distance = math.max(20, math.max(span.X, span.Y, span.Z) * 1.1)
-		workspace.CurrentCamera.CFrame = CFrame.lookAt(center + Vector3.new(distance * .65, distance * .5, distance), center)
-		workspace.CurrentCamera.Focus = CFrame.new(center)
-	end
-end
-
 local function acceptInvitation()
 	if not inbox or inviting or busy then return end
 	if active then status("Disconnect from current session first."); return end
@@ -1186,7 +2301,7 @@ local function acceptInvitation()
 	inviting = true
 	local ok, err = pcall(function()
 		local result = api("/invitations/"..inbox.id.."/respond", "POST", {decision = "accept"})
-		room.Text = result.room.id; inbox = nil; yes.Visible = false; no.Visible = false
+		room.Text = result.room.id; token.Text = result.token or token.Text; credential = token.Text; inbox = nil; yes.Visible = false; no.Visible = false
 		sessionTitle.Text = result.room.name
 
 		index()
@@ -1196,7 +2311,7 @@ local function acceptInvitation()
 		connectSession(); connect.Visible = active
 		if not active then error(notice.Text) end
 		for _, obj in ipairs(defaults) do local key = ids[obj]; if key and not initial.objects[key] then baseline[key] = nil; objects[key] = nil; ids[obj] = nil; obj:Destroy() end end
-		focusImportedPlace()
+		-- Camera untouched
 		incoming.Text = "You are collaborating on "..result.room.name.." together."
 	end)
 	inviting = false; if not ok then status(tostring(err)) end
@@ -1206,7 +2321,7 @@ yes.MouseButton1Click:Connect(acceptInvitation)
 retry.MouseButton1Click:Connect(function()
 	if busy or active or room.Text == "" then return end
 	connectSession(); connect.Visible = active
-	if active then focusImportedPlace() end
+	-- Camera untouched
 end)
 
 no.MouseButton1Click:Connect(function()
@@ -1221,22 +2336,71 @@ connect.MouseButton1Click:Connect(connectSession)
 accept.MouseButton1Click:Connect(function()
 	if busy or not endpoint then return end
 	busy = true
-	local ok, err = pcall(function() local current = snapshot(); local state = request("GET"); apply(state.objects, current, true); active = true; connect.Visible = true; accept.Visible = false; status("Server version accepted.") end)
+	local ok, err = pcall(function() local current = snapshot(true); local state = request("GET"); apply(state.objects, current, true); active = true; connect.Visible = true; accept.Visible = false; status("Server version accepted.") end)
 	busy = false; if not ok then status(tostring(err)) end
+end)
+
+btnDeleteActiveRoom.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	local pName = sessionTitle.Text ~= "" and sessionTitle.Text or room.Text
+	activeDelPrompt.Text = "Permanently delete '" .. pName .. "' from server?"
+	activeDelPw.Text = ""
+	activeDelConfirm.Visible = true
+	btnDeleteActiveRoom.Visible = false
+	activeDelPw:CaptureFocus()
+end)
+
+activeDelCancel.MouseButton1Click:Connect(function()
+	activeDelConfirm.Visible = false
+	btnDeleteActiveRoom.Visible = true
+end)
+
+activeDelExec.MouseButton1Click:Connect(function()
+	if not active or room.Text == "" then return end
+	local curRoom = room.Text
+	local pName = sessionTitle.Text ~= "" and sessionTitle.Text or curRoom
+	status("Deleting active project '" .. pName .. "' from server...")
+	local ok, res = pcall(function()
+		return api("/rooms/" .. curRoom .. "/delete", "POST", {password = activeDelPw.Text})
+	end)
+	if ok then
+		status("Project '" .. pName .. "' deleted successfully from server.")
+		activeDelConfirm.Visible = false
+		btnDeleteActiveRoom.Visible = true
+		activeDelPw.Text = ""
+		active = false
+		endpoint = nil
+		connect.Text = "Reconnect to Session"
+		room.Text = ""
+		token.Text = ""
+		credential = nil
+		plugin:SetSetting("PTRoom", "")
+		uiTab = "projects"
+		refreshUI(active, loggedIn, inbox ~= nil, busy)
+		refreshProjectsList()
+	else
+		status("Delete failed: " .. tostring(res))
+	end
 end)
 
 task.spawn(function()
 	if selfNick.Text == "" then pcall(function() local uid = game:GetService("StudioService"):GetUserId(); if uid > 0 then selfNick.Text = game:GetService("Players"):GetNameFromUserIdAsync(uid) end end) end
 	if address.Text ~= "" and address.Text:match("^https?://") then
 		local ready, reason = pcall(guestEnter)
-		if not ready then status("Failed to connect. Check server address in Settings. "..tostring(reason)) end
+		if not ready then
+			status("Failed to connect. Check server address in Settings. "..tostring(reason))
+		else
+			pcall(refreshProjectsList)
+		end
 	else
 		status("Enter server address in Settings tab")
 	end
-	while true do
-		task.wait(1.5)
-		if not loggedIn and not inviting and not polling then pcall(guestEnter) end
-		if loggedIn and not polling and not inviting then
+	task.spawn(fetchDashStatus)
+	while alive do
+		task.wait(3.0)
+		if not alive then break end
+		if not loggedIn and not inviting and not polling and widget.Enabled then pcall(guestEnter) end
+		if alive and loggedIn and not polling and not inviting and widget.Enabled and (active or uiTab == "session") then
 			polling = true
 			local ok, err = pcall(function()
 				local invitations = api("/invitations")
@@ -1251,7 +2415,7 @@ task.spawn(function()
 				end
 				local nextInvite = invitations[#invitations]
 				if nextInvite and (not inbox or inbox.id ~= nextInvite.id) then
-					inbox = nextInvite; incoming.Text = nextInvite.from.." invited you to '"..nextInvite.place.."'. Open an empty place before accepting."; yes.Visible = true; no.Visible = true; uiTab = "home"; widget.Enabled = true
+					inbox = nextInvite; incoming.Text = nextInvite.from.." invited you to '"..nextInvite.place.."'. Open an empty place before accepting."; yes.Visible = true; no.Visible = true; uiTab = "session"; widget.Enabled = true
 				elseif not nextInvite and inbox then inbox = nil; yes.Visible = false; no.Visible = false; incoming.Text = "No new invitations." end
 			end)
 			polling = false; if not ok then incoming.Text = "Failed to check invitations: "..tostring(err) end
@@ -1259,18 +2423,20 @@ task.spawn(function()
 	end
 end)
 
+-- Main sync loop (Zero-Lag: yields without freeze)
 task.spawn(function()
-	while true do
+	while alive do
 		task.wait(0.5) 
+		if not alive then break end
 		if active and not busy and not Run:IsRunning() then
 			busy = true
 			local ok, err = pcall(function()
-				local current = snapshot()
-				local state = sendChanges(current)
-				status((warnings.syncConflict and "Unsent changes pending" or ("Server confirmed rev "..state.revision)).." · session "..room.Text:sub(1, 8)..warningText())
+				local current = snapshot(false)
+				local state = sendChanges(current, false)
+				status((warnings.syncConflict and "Unsent changes pending" or ("Server rev "..tostring(state.revision))).." · room "..room.Text:sub(1, 10)..warningText())
 			end)
 			busy = false
-			if not ok then status("Sync temporarily failed; retrying automatically. Local changes preserved. "..tostring(err)) end
+			if not ok then status("Sync retrying... Local changes preserved. "..tostring(err)) end
 		elseif active and Run:IsRunning() then
 			status("Sync paused during Play mode. Stop game to resume editing.")
 		end
@@ -1278,10 +2444,13 @@ task.spawn(function()
 end)
 
 plugin.Unloading:Connect(function()
+	alive = false
 	if active and not busy and not Run:IsRunning() then
-		busy = true
-		pcall(function() local current = snapshot(); local remote = sendChanges(current) end)
-		busy = false
+		pcall(function()
+			if room.Text ~= "" then
+				api("/rooms/"..room.Text.."/presence", "POST", {leave = true})
+			end
+		end)
 	end
 	active = false; loggedIn = false
 end)
@@ -1289,7 +2458,8 @@ end)
 logout.MouseButton1Click:Connect(function()
 	if busy or inviting then return end
 	inviting = true; local ok, err = pcall(guestEnter); inviting = false
-	if not ok then status("Check server in Settings. "..tostring(err)) end
+	if not ok then status("Check server in Settings. "..tostring(err)) else status("Connection active: " .. base()) end
+	fetchDashStatus()
 end)
 
 local previousAddress = base()
@@ -1298,8 +2468,9 @@ address.FocusLost:Connect(function()
 	if busy or inviting then address.Text = previousAddress; status("Please wait for current operation to finish."); return end
 	previousAddress = base(); active = false; loggedIn = false; inbox = nil; room.Text = ""; token.Text = ""
 	yes.Visible = false; no.Visible = false
-	plugin:SetSetting("PTAddress", base()); uiTab = "home"; local ok, err = pcall(guestEnter)
-	if not ok then status("Failed to connect to new server. "..tostring(err)) end
+	plugin:SetSetting("PTAddress", base()); uiTab = "projects"; local ok, err = pcall(guestEnter)
+	if not ok then status("Failed to connect to new server. "..tostring(err)) else refreshProjectsList() end
+	task.spawn(fetchDashStatus)
 end)
 
 selfNick.FocusLost:Connect(function()
@@ -1311,25 +2482,111 @@ selfNick.FocusLost:Connect(function()
 end)
 
 task.spawn(function()
-	while true do
+	while alive do
+		if not alive then break end
 		refreshUI(active, loggedIn, inbox ~= nil, busy or inviting)
 		task.wait(.25)
 	end
 end)
 
--- Peer Cursors / Participant Avatars
+-- Peer Cursors / Participant Avatars (Stationary debounce: 0% network when camera not moving)
 do
-	local alive = true
 	local enabled = plugin:GetSetting("PTShowParticipants") ~= false
 	local folder = nil
 	local markers = {}
 	local previousRoom = nil
 	local previousBase = nil
 	local sending = false
+	local lastCamPos = Vector3.new()
+	local lastCamLook = Vector3.new()
+	local lastPresenceSend = 0
+
+	local function updatePeerCards(peers)
+		for _, child in ipairs(peersFrame:GetChildren()) do
+			if not child:IsA("UIListLayout") and child ~= participantsText then
+				child:Destroy()
+			end
+		end
+		if #peers == 0 then
+			participantsText.Visible = true
+			participantsText.Text = "No other participants connected yet."
+			return
+		end
+		participantsText.Visible = false
+		for _, peer in ipairs(peers) do
+			local pCard = Instance.new("Frame")
+			pCard.Name = "PeerCard_"..tostring(peer.id)
+			pCard.Size = UDim2.new(1, 0, 0, 42)
+			pCard.BackgroundColor3 = Color3.fromRGB(18, 22, 31)
+			pCard.BorderSizePixel = 0
+			pCard.Parent = peersFrame
+			corner(pCard, 8)
+			stroke(pCard, palette.line, 1)
+
+			local avatar = Instance.new("ImageLabel")
+			avatar.Name = "Avatar"
+			avatar.Size = UDim2.fromOffset(30, 30)
+			avatar.Position = UDim2.new(0, 6, 0.5, -15)
+			avatar.BackgroundTransparency = 1
+			local uid = tonumber(peer.userId) or 0
+			if uid > 0 then
+				avatar.Image = "rbxthumb://type=AvatarHeadShot&id="..tostring(uid).."&w=150&h=150"
+			else
+				avatar.Image = ""
+			end
+			avatar.Parent = pCard
+			corner(avatar, 15)
+
+			local tint = Color3.fromHSV(peer.hue or 0.5, .75, 1)
+			local dot = Instance.new("Frame")
+			dot.Name = "Dot"
+			dot.Size = UDim2.fromOffset(8, 8)
+			dot.Position = UDim2.new(0, 26, 0.5, 4)
+			dot.BackgroundColor3 = (peer.isIdle == true) and Color3.fromRGB(234, 179, 8) or tint
+			dot.BorderSizePixel = 0
+			dot.Parent = pCard
+			corner(dot, 4)
+
+			local nameLbl = Instance.new("TextLabel")
+			nameLbl.Name = "Name"
+			nameLbl.Size = UDim2.new(1, -48, 0, 16)
+			nameLbl.Position = UDim2.new(0, 42, 0, 4)
+			nameLbl.BackgroundTransparency = 1
+			nameLbl.Font = Enum.Font.GothamBold
+			nameLbl.TextSize = 12
+			nameLbl.TextColor3 = palette.text
+			nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+			nameLbl.Text = peer.name
+			nameLbl.Parent = pCard
+
+			local isIdle = peer.isIdle == true
+			local actLbl = Instance.new("TextLabel")
+			actLbl.Name = "Activity"
+			actLbl.Size = UDim2.new(1, -48, 0, 14)
+			actLbl.Position = UDim2.new(0, 42, 0, 20)
+			actLbl.BackgroundTransparency = 1
+			actLbl.Font = Enum.Font.Gotham
+			actLbl.TextSize = 10
+			actLbl.TextColor3 = isIdle and Color3.fromRGB(234, 179, 8) or palette.green
+			actLbl.TextXAlignment = Enum.TextXAlignment.Left
+			local actText = peer.activity
+			if not actText or actText == "" then
+				local selCount = peer.selected and #peer.selected or 0
+				actText = selCount > 0 and ("Selected " .. selCount .. " part(s)") or "Viewing place"
+			end
+			if isIdle and not actText:find("Idle%s*%(") then
+				local idleT = peer.idleTime or 60
+				actText = (actText == "Viewing place") and ("Idle (" .. formatDuration(idleT) .. ")") or ("Idle (" .. formatDuration(idleT) .. ") · " .. actText)
+			end
+			actLbl.Text = actText
+			actLbl.Parent = pCard
+		end
+	end
 
 	local function clear()
 		if folder then folder:Destroy(); folder = nil end
 		markers = {}
+		pcall(function() updatePeerCards({}) end)
 	end
 
 	local function vector(v) return Vector3.new(v[1], v[2], v[3]) end
@@ -1337,7 +2594,7 @@ do
 	local function marker(peer)
 		if not folder then folder = Instance.new("Folder"); folder.Name = "PlaceTogetherPresence"; folder.Archivable = false; folder.Parent = game:GetService("CoreGui") end
 		local group = Instance.new("Folder"); group.Name = peer.id; group.Parent = folder
-		local tint = Color3.fromHSV(peer.hue, .65, 1)
+		local tint = Color3.fromHSV(peer.hue or 0.5, .65, 1)
 		local sphere = Instance.new("SphereHandleAdornment"); sphere.Name = "Participant"; sphere.Adornee = workspace.Terrain; sphere.Radius = 1.5; sphere.Color3 = tint; sphere.Transparency = .15; sphere.AlwaysOnTop = false; sphere.Parent = group
 		pcall(function() sphere.Shading = Enum.AdornShading.Shaded end)
 		local direction = Instance.new("LineHandleAdornment"); direction.Name = "Direction"; direction.Adornee = workspace.Terrain; direction.Color3 = tint; direction.Thickness = 3; direction.Parent = group
@@ -1352,26 +2609,100 @@ do
 			present[peer.id] = true; table.insert(names, peer.name)
 			if enabled then
 				local item = markers[peer.id] or marker(peer); markers[peer.id] = item
-				item.target = vector(peer.position); item.targetLook = vector(peer.look); item.label.Text = peer.name; item.seen = os.clock()
+				item.target = vector(peer.position); item.targetLook = vector(peer.look);
+				local lblText = peer.name
+				if peer.isIdle then
+					local idleT = peer.idleTime or 60
+					lblText = peer.name .. " (Idle " .. formatDuration(idleT) .. ")"
+				end
+				item.label.Text = lblText; item.seen = os.clock()
 				item.selection = {}; for _, key in ipairs(peer.selected or {}) do item.selection[key] = true end
 				for key, box in pairs(item.boxes) do if not item.selection[key] then box:Destroy(); item.boxes[key] = nil end end
 			end
 		end
 		for id, item in pairs(markers) do if not present[id] then item.group:Destroy(); markers[id] = nil end end
-		participantsText.Text = #names > 0 and ("Peers: "..table.concat(names, ", ")) or "No other participants yet."
+		updatePeerCards(peers)
 	end
 
 	local function cameraState()
 		local camera = workspace.CurrentCamera; if not camera then return nil end
 		local position = camera.CFrame.Position; local look = camera.CFrame.LookVector
+		local now = os.clock()
+
+		if not lastCameraPos or (position - lastCameraPos).Magnitude > 0.05 or (look - lastCameraLook).Magnitude > 0.02 then
+			lastActionTime = now
+			lastCameraPos = position
+			lastCameraLook = look
+		end
+
+		local rawSelected = Selection:Get()
+		local selected = {}
+		for _, obj in ipairs(rawSelected) do
+			local key = ids[obj]
+			if key and obj:IsDescendantOf(workspace) and (obj:IsA("BasePart") or obj:IsA("Model")) then
+				table.insert(selected, key)
+				if #selected >= 32 then break end
+			end
+		end
+
+		local idleSec = math.max(0, math.floor(now - lastActionTime))
+		local isIdle = (idleSec >= 60)
+		local isPlaying = false
+		pcall(function()
+			isPlaying = game:GetService("RunService"):IsRunning()
+		end)
+
+		local act = "Viewing place"
+		if isPlaying then
+			act = "Testing place (Play mode)"
+		elseif (now - lastScriptEditTime) < 15 and lastScriptDocName then
+			act = "Editing script: " .. lastScriptDocName
+		elseif #rawSelected > 0 then
+			local animModel = nil
+			for _, item in ipairs(rawSelected) do
+				local m = item:IsA("Model") and item or item:FindFirstAncestorWhichIsA("Model")
+				if m and isRigBeingAnimated(m) then animModel = m; break end
+			end
+			if animModel then
+				local mName = tostring(animModel.Name)
+				if #mName > 22 then mName = mName:sub(1, 20) .. ".." end
+				act = "Animating: " .. mName
+			elseif #rawSelected == 1 then
+				local item = rawSelected[1]
+				local sName = tostring(item.Name)
+				if #sName > 22 then sName = sName:sub(1, 20) .. ".." end
+				if item:IsA("LuaSourceContainer") then
+					act = "Editing script: " .. sName
+				else
+					act = "Selected: " .. sName
+				end
+			else
+				act = "Selected " .. #rawSelected .. " objects"
+			end
+		end
+
+		if isIdle then
+			if act == "Viewing place" then
+				local timeStr = formatDuration(idleSec)
+				act = "Idle (" .. timeStr .. ")"
+			else
+				local timeStr = formatDuration(idleSec)
+				act = "Idle (" .. timeStr .. ") · " .. act
+			end
+		end
+
 		local hit = workspace:Raycast(position, Vector3.new(0, -512, 0))
 		local ground = hit and hit.Position + Vector3.new(0, .12, 0) or position - Vector3.new(0, 3, 0)
-		local selected = {}
-		for _, obj in ipairs(game:GetService("Selection"):Get()) do
-			local key = ids[obj]
-			if key and obj:IsDescendantOf(workspace) and (obj:IsA("BasePart") or obj:IsA("Model")) then table.insert(selected, key); if #selected >= 32 then break end end
-		end
-		return {position = {position.X, position.Y, position.Z}, look = {look.X, look.Y, look.Z}, ground = {ground.X, ground.Y, ground.Z}, selected = selected}
+		return {
+			position = {position.X, position.Y, position.Z},
+			look = {look.X, look.Y, look.Z},
+			ground = {ground.X, ground.Y, ground.Z},
+			selected = selected,
+			userId = localUserId,
+			activity = act,
+			isIdle = isIdle,
+			idleTime = idleSec
+		}
 	end
 
 	presenceToggle.Text = enabled and "Peer Cursors: On" or "Peer Cursors: Off"
@@ -1409,21 +2740,54 @@ do
 				local currentRoom = room.Text; local currentBase = base()
 				if previousRoom ~= currentRoom or previousBase ~= currentBase then clear() end
 				previousRoom = currentRoom; previousBase = currentBase
-				local payload = cameraState()
-				if payload then
-					sending = true
-					local ok, peers = pcall(function() return api("/rooms/"..currentRoom.."/presence", "POST", payload) end)
-					sending = false
-					if alive and active and not Run:IsRunning() and currentRoom == room.Text and currentBase == base() then
-						if ok then
-							local rendered, reason = pcall(function() receive(peers) end)
-							if not rendered then clear(); participantsText.Text = "Peer cursors: "..tostring(reason) end
-						else participantsText.Text = "Updating peer connection..." end
+				
+				local nowSec = os.clock()
+				local myIdleSec = math.max(0, math.floor(nowSec - lastActionTime))
+				local myIsIdle = (myIdleSec >= 60)
+				if myIsIdle then
+					dot.BackgroundColor3 = Color3.fromRGB(234, 179, 8)
+					statusBadgeLabel.Text = "IDLE " .. formatDuration(myIdleSec)
+					statusBadgeLabel.TextColor3 = Color3.fromRGB(234, 179, 8)
+					badgeStroke.Color = Color3.fromRGB(234, 179, 8)
+					identity.Text = selfNick.Text .. " · Idle (" .. formatDuration(myIdleSec) .. ")"
+				else
+					dot.BackgroundColor3 = palette.green
+					statusBadgeLabel.Text = "LIVE"
+					statusBadgeLabel.TextColor3 = palette.green
+					badgeStroke.Color = palette.green
+					identity.Text = selfNick.Text .. " · In Session"
+				end
+				
+				local cam = workspace.CurrentCamera
+				local camMoved = false
+				if cam then
+					local curPos = cam.CFrame.Position
+					local curLook = cam.CFrame.LookVector
+					if (curPos - lastCamPos).Magnitude > 0.1 or (curLook - lastCamLook).Magnitude > 0.05 or (os.clock() - lastPresenceSend > 3.0) then
+						camMoved = true
+						lastCamPos = curPos
+						lastCamLook = curLook
+					end
+				end
+
+				if camMoved then
+					local payload = cameraState()
+					if payload then
+						sending = true
+						lastPresenceSend = os.clock()
+						local ok, peers = pcall(function() return api("/rooms/"..currentRoom.."/presence", "POST", payload) end)
+						sending = false
+						if alive and active and not Run:IsRunning() and currentRoom == room.Text and currentBase == base() then
+							if ok then
+								local rendered, reason = pcall(function() receive(peers) end)
+								if not rendered then clear(); participantsText.Text = "Peer cursors: "..tostring(reason) end
+							else participantsText.Text = "Updating peer connection..." end
+						end
 					end
 				end
 			else
 				clear()
-				participantsText.Text = "Participants will appear once connected."
+				participantsText.Text = "No other participants connected yet."
 				if previousRoom and not sending then
 					local oldRoom = previousRoom; local oldBase = previousBase
 					previousRoom = nil; previousBase = nil
@@ -1435,7 +2799,8 @@ do
 	end)
 
 	plugin.Unloading:Connect(function() alive = false; renderConnection:Disconnect(); toggleConnection:Disconnect(); clear() end)
-end]]></ProtectedString>
+end
+]]></ProtectedString>
 			<bool name="Disabled">false</bool>
 			<Content name="LinkedSource"><null></null></Content>
 			<token name="RunContext">0</token>
