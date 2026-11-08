@@ -53,9 +53,6 @@ HISTORY_BUFFER_SIZE = 500             # Retain last 500 delta batches per room
 # Ephemeral in-memory state
 state_lock = threading.RLock()
 presences = {}          # room_id -> { token -> peer_data }
-room_loads = {}         # room_id -> { token -> load_entry }
-room_ready = {}         # room_id -> bool
-snapshot_order_cache = {} # room_id -> (order_list, revision)
 last_logged_peers = {}  # room_id -> set of active user names
 invitations = []        # list of invite dicts
 next_invite_id = 1
@@ -508,67 +505,6 @@ class Database:
                     self.conn.execute("UPDATE guests SET user_id = ? WHERE token = ? AND (user_id IS NULL OR user_id = 0)", (user_id, token))
             except Exception:
                 pass
-
-    def get_snapshot(self, room_id: str, cursor: int = 0, limit: int = 96) -> dict:
-        with self.lock:
-            cur = self.conn.cursor()
-            cur.execute("SELECT revision, name, owner FROM rooms WHERE id = ?", (room_id,))
-            r_row = cur.fetchone()
-            if not r_row:
-                return None
-            rev = r_row["revision"]
-
-            cached_order, cached_rev = snapshot_order_cache.get(room_id, (None, -1))
-            if cached_order is None or cached_rev != rev:
-                cur.execute("SELECT object_key, parent_key FROM objects WHERE room_id = ?", (room_id,))
-                rows = cur.fetchall()
-                parent_map = {row["object_key"]: (row["parent_key"] or "") for row in rows}
-                depth_cache = {}
-
-                def depth(oid):
-                    chain = []
-                    positions = {}
-                    curr = oid
-                    while curr in parent_map and curr not in depth_cache:
-                        if curr in positions:
-                            cycle_start = positions[curr]
-                            for m in chain[cycle_start:]:
-                                depth_cache[m] = 0
-                            chain = chain[:cycle_start]
-                            break
-                        positions[curr] = len(chain)
-                        chain.append(curr)
-                        curr = parent_map.get(curr)
-                    for m in reversed(chain):
-                        p = parent_map.get(m)
-                        depth_cache[m] = depth_cache.get(p, -1) + 1
-                    return depth_cache.get(oid, 0)
-
-                order = sorted(parent_map.keys(), key=lambda oid: (depth(oid), oid))
-                order.sort(key=lambda key: 0 if key.startswith('~Terrain/Full/') else 2 if key.startswith('~Terrain/') else 1)
-                snapshot_order_cache[room_id] = (order, rev)
-                cached_order = order
-
-            total = len(cached_order)
-            keys = cached_order[cursor : cursor + limit]
-            objects = {}
-            if keys:
-                placeholders = ",".join("?" for _ in keys)
-                cur.execute(f"SELECT object_key, data_json FROM objects WHERE room_id = ? AND object_key IN ({placeholders})", [room_id] + keys)
-                for row in cur.fetchall():
-                    try:
-                        objects[row["object_key"]] = json.loads(row["data_json"])
-                    except Exception:
-                        pass
-
-            next_cursor = cursor + len(keys)
-            return {
-                "revision": rev,
-                "objects": objects,
-                "total": total,
-                "nextCursor": next_cursor,
-                "done": next_cursor >= total
-            }
 
     def get_room_objects(self, room_id: str, page: int = 0, limit: int = 0) -> tuple:
         with self.lock:
@@ -1370,68 +1306,8 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
         # 3. List Rooms: /api/rooms
         if path == "/api/rooms":
             rooms_list = db.get_rooms_list()
-            now = time.time()
-            with state_lock:
-                for r in rooms_list:
-                    r_id = r["id"]
-                    room_p = presences.get(r_id, {})
-                    active_peers = [p for p in room_p.values() if now - p.get("time", 0) < 15]
-                    active_testers = [p.get("name", "Peer") for p in active_peers if p.get("teamTest", {}).get("active")]
-                    r["mode"] = r.get("mode", "live")
-                    r["ready"] = room_ready.get(r_id, True)
-                    r["activePeers"] = [p.get("name", "Peer") for p in active_peers]
-                    r["activeTesters"] = active_testers
-                    r["teamTestActive"] = len(active_testers) > 0
-                    r["objectCount"] = r.get("objects_count", 0)
             self.send_json(200, rooms_list)
             return
-
-        # 3b. Room Snapshot / Meta / Load GET: /api/rooms/<id>/(snapshot|meta|load)
-        if path.startswith("/api/rooms/") and any(path.endswith(s) for s in ("/snapshot", "/meta", "/load")):
-            parts = path.split("/")
-            room_id = parts[3]
-            room = db.get_room(room_id)
-            if not room:
-                self.send_json(404, {"error": "Room not found on server"})
-                return
-
-            endpoint = parts[4]
-            if endpoint == "snapshot":
-                cursor = int(query_params.get("cursor", 0))
-                limit = max(1, min(500, int(query_params.get("limit", 96))))
-                res = db.get_snapshot(room_id, cursor=cursor, limit=limit)
-                if res is None:
-                    self.send_json(404, {"error": "Room not found"})
-                    return
-                self.send_json(200, res)
-                return
-
-            if endpoint == "meta":
-                _, total, _ = db.get_room_objects(room_id, page=1, limit=1)
-                self.send_json(200, {
-                    "id": room_id,
-                    "name": room["name"],
-                    "mode": room.get("mode", "live"),
-                    "ready": room_ready.get(room_id, True),
-                    "closed": False,
-                    "persistent": True,
-                    "revision": room["revision"],
-                    "objectCount": total,
-                    "sizeBytes": 0,
-                    "heavy": total >= 5000
-                })
-                return
-
-            if endpoint == "load":
-                now = time.time()
-                with state_lock:
-                    loads = room_loads.setdefault(room_id, {})
-                    for tok, entry in list(loads.items()):
-                        if now - entry.get("time", 0) > 30 or not entry.get("active"):
-                            loads.pop(tok, None)
-                    active_loads = [dict(v, token=k) for k, v in loads.items()]
-                self.send_json(200, active_loads)
-                return
 
         # 4. Room Sync GET: /api/rooms/<id>/sync with support for ?since=<rev>&page=<p>&limit=<l>
         if path.startswith("/api/rooms/") and path.endswith("/sync"):
@@ -1512,26 +1388,14 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                 return
 
             _, total, _ = db.get_room_objects(room_id, page=1, limit=1)
-            now = time.time()
-            with state_lock:
-                room_p = presences.get(room_id, {})
-                active_testers = [p.get("name", "Peer") for p in room_p.values() if p.get("teamTest", {}).get("active") and now - p.get("time", 0) < 15]
             self.send_json(200, {
                 "id": room_id,
                 "name": room["name"],
-                "mode": room.get("mode", "live"),
-                "ready": room_ready.get(room_id, True),
                 "requires_password": bool(room["password_hash"]),
                 "isOwner": (room["owner"] == token),
-                "closed": False,
-                "persistent": True,
                 "revision": room["revision"],
                 "objects_count": total,
-                "objectCount": total,
-                "sizeBytes": 0,
-                "lastSaved": int(room.get("updated_at") or 0),
-                "activeTesters": active_testers,
-                "teamTestActive": len(active_testers) > 0,
+                "persistent": True,
                 "database": "SQLite"
             })
             return
@@ -1759,42 +1623,6 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
             self.send_json(200, res)
             return
 
-        # 4b. Room Load / Ready POST: /api/rooms/<id>/(load|ready)
-        if path.startswith("/api/rooms/") and any(path.endswith(s) for s in ("/load", "/ready")):
-            parts = path.split("/")
-            room_id = parts[3]
-            room = db.get_room(room_id)
-            if not room:
-                self.send_json(404, {"error": "Room not found on server"})
-                return
-
-            endpoint = parts[4]
-            if endpoint == "ready":
-                with state_lock:
-                    room_ready[room_id] = True
-                self.send_json(200, {"ready": True})
-                return
-
-            if endpoint == "load":
-                guest = db.get_guest(token)
-                user_name = guest["name"] if guest else "Peer"
-                now = time.time()
-                with state_lock:
-                    loads = room_loads.setdefault(room_id, {})
-                    if data.get("active"):
-                        loads[token] = {
-                            "active": True,
-                            "name": user_name,
-                            "task": str(data.get("task", "Loading"))[:120],
-                            "done": data.get("done", 0),
-                            "total": data.get("total", 0),
-                            "time": now
-                        }
-                    else:
-                        loads.pop(token, None)
-                self.send_json(200, {"ok": True})
-                return
-
         # 5. Presence / Camera POST: /api/rooms/<id>/presence
         if path.startswith("/api/rooms/") and path.endswith("/presence"):
             parts = path.split("/")
@@ -1837,10 +1665,6 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                         "position": data.get("position", [0, 10, 0]),
                         "look": data.get("look", [0, 0, -1]),
                         "selected": data.get("selected", []),
-                        "transforms": data.get("transforms", {}),
-                        "teamTest": data.get("teamTest", None),
-                        "activeScript": data.get("activeScript", None),
-                        "ping": dict(data["ping"], time=now) if isinstance(data.get("ping"), dict) else None,
                         "activity": activity,
                         "isIdle": is_idle,
                         "idleTime": safe_int(data.get("idleTime"), 0),
@@ -1852,10 +1676,7 @@ class PlaceTogetherHandler(BaseHTTPRequestHandler):
                 current_active_names = set()
                 for p_id, p in list(room_presences.items()):
                     if now - p.get("time", 0) < 15 and p_id != token:
-                        item = copy.deepcopy(p)
-                        if item.get("ping") and isinstance(item["ping"], dict):
-                            item["ping"]["age"] = max(0, now - item["ping"]["time"])
-                        active_peers.append(item)
+                        active_peers.append(p)
                     if now - p.get("time", 0) < 15:
                         current_active_names.add(p.get("name", "Peer"))
                     elif now - p.get("time", 0) >= 15:
